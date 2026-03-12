@@ -1,6 +1,6 @@
 # OptDash — Part 3: Analytics Engine
 
-All analytics modules live in `optdash/analytics/`. They are pure functions — no state, no side effects — that take a DuckDB connection plus time/underlying coordinates and return dicts or lists.
+All analytics modules live in `optdash/analytics/`. They are **pure functions** — no state, no side effects — taking a `DuckDB connection` (LockedConn) plus time/underlying coordinates and returning dicts or lists. Every analytics function has a top-level `try/except` that calls `record_error(fn_name)` and returns a safe empty result on failure.
 
 ---
 
@@ -8,169 +8,144 @@ All analytics modules live in `optdash/analytics/`. They are pure functions — 
 
 ### 1.1 What is GEX?
 
-Gamma Exposure (GEX) measures the aggregate dollar gamma that **market makers (dealers)** hold across all strikes. Because dealers are typically short options (they sell them to retail), their net position is short gamma. To hedge their delta exposure, they must **buy when price rises** and **sell when price falls** (buying high, selling low) — this is the classic gamma pin / suppression effect.
+Gamma Exposure measures the aggregate dollar gamma that market makers hold. Dealers short options must hedge by buying into rallies and selling into dips — this creates the gamma pin effect.
 
-- **Positive GEX**: Dealers are net long gamma → they buy dips and sell rips → suppresses volatility (range-bound)
-- **Negative GEX**: Dealers are net short gamma → they sell dips and buy rips → amplifies moves (trending)
+- **Positive GEX**: Dealers net long gamma → suppress volatility (range-bound, chop)
+- **Negative GEX**: Dealers net short gamma → amplify moves (trending)
 
-### 1.2 `get_net_gex(conn, trade_date, snap_time, underlying) → dict`
-
-Computes the current net GEX snapshot.
+### 1.2 `get_net_gex(conn, trade_date, snap_time, underlying, _peak_cache=None) → dict`
 
 ```sql
-SELECT
-    arg_max(spot, snap_time)   AS spot,          -- Latest snap's spot price
-    arg_max(futures_price, snap_time) AS futures_price,
-    SUM(CASE WHEN option_type='CE' THEN gamma * oi * spot * spot * 0.01
-             ELSE -gamma * oi * spot * spot * 0.01 END) AS net_gex
+SELECT SUM(gex)                                                              AS gex_all_raw,
+       SUM(CASE WHEN expiry_tier IN ('TIER1','TIER2') THEN gex ELSE 0 END)  AS gex_near_raw,
+       SUM(CASE WHEN expiry_tier = 'TIER3'            THEN gex ELSE 0 END)  AS gex_far_raw,
+       MAX(spot) AS spot
 FROM options_data
-WHERE trade_date=? AND snap_time=? AND underlying=? AND expiry_tier='TIER1'
+WHERE trade_date=? AND snap_time=? AND underlying=?
+GROUP BY snap_time
 ```
 
-**GEX formula per strike:**
-```
-GEX_CE = +gamma × OI × spot² × 0.01
-GEX_PE = -gamma × OI × spot² × 0.01
-Net GEX = Σ(GEX_CE + GEX_PE) across all TIER1 strikes
-```
+GEX values are divided by `settings.GEX_SCALING` (default 1B) to produce readable `_B` (billion) figures.
 
-> The `0.01` factor converts gamma (per 1% spot move) to absolute dollar terms.
+`_peak_cache` is an optional dict shared within a tick to avoid redundant full-day peak scans across multiple callers.
 
 **Returns:**
 ```json
 {
   "snap_time": "10:30",
-  "spot": 22150.5,
-  "futures_price": 22162.0,
-  "net_gex": 4520000000,
+  "gex_all_B": 4.52,
+  "gex_near_B": 3.21,
+  "gex_far_B": 1.31,
   "pct_of_peak": 78.3,
   "regime": "POSITIVE_CHOP",
-  "day_open": 22050.0,
-  "day_high": 22200.0,
-  "day_low": 22010.0,
-  "change_pct": 0.45
+  "spot": 22150.5
 }
 ```
 
-### 1.3 GEX Regime Classification
+### 1.3 GEX Regime Classification (`_classify_regime`)
 
 | Condition | Regime | Meaning |
 |---|---|---|
-| `net_gex > 0` | `POSITIVE_CHOP` | Gamma pin active, range-bound expected |
-| `net_gex <= 0` | `NEGATIVE_TREND` | No gamma support, directional move easier |
+| `gex < 0` | `NEGATIVE_TREND` | Dealers net short gamma → trending |
+| `gex >= 0` and `pct_of_peak <= GEX_DECLINE_THRESHOLD×100` | `POSITIVE_DECLINING` | Gamma wall weakening |
+| `gex > 0` and above threshold | `POSITIVE_CHOP` | Strong gamma pin → mean-reversion |
 
-### 1.4 `pct_of_peak` Calculation
+`pct_of_peak = abs(gex_all) / day_peak_gex * 100`. Guard: `if peak != 0` prevents division by zero (not `if peak` which would treat a genuine zero-GEX day incorrectly).
 
-```sql
--- Intraday GEX peak (maximum absolute GEX seen today)
-SELECT MAX(ABS(net_gex)) AS peak_gex
-FROM (
-    SELECT SUM(...) AS net_gex
-    FROM options_data WHERE trade_date=? AND underlying=?
-    GROUP BY snap_time
-)
+### 1.4 `get_max_pain(conn, trade_date, snap_time, underlying, expiry_date) → dict`
+
+Max pain is computed via **vectorised NumPy outer-subtraction** — no Python loop:
+
+```python
+diff        = strikes[:, None] - strikes[None, :]   # NxN matrix
+ce_pain_mat = np.maximum(0.0,  diff) * ce_oi       # CE payout at each settlement
+pe_pain_mat = np.maximum(0.0, -diff) * pe_oi       # PE payout at each settlement
+pain_arr    = ce_pain_mat.sum(axis=1) + pe_pain_mat.sum(axis=1)
+max_pain    = strikes[np.argmin(pain_arr)]
 ```
 
-`pct_of_peak = (current_net_gex / peak_gex) * 100`
-
-A declining `pct_of_peak` (e.g. dropping below 70%) indicates unwinding of gamma support — key alert trigger.
+Returns `{"max_pain": float, "distance_pct": float, "spot": float}`. `max_pain` may be `None` if no options data.
 
 ### 1.5 `get_spot_summary(conn, trade_date, underlying) → dict`
 
-Computes correct full-day OHLC using aggregate functions:
-
 ```sql
-SELECT
-    arg_max(spot, snap_time) AS spot,       -- Latest snap's spot
-    arg_min(spot, snap_time) AS day_open,   -- FIRST snap's spot
-    MAX(spot)                AS day_high,   -- True intraday high
-    MIN(spot)                AS day_low,    -- True intraday low
-    arg_max(snap_time, snap_time) AS snap_time
-FROM options_data
-WHERE trade_date=? AND underlying=?
+SELECT MAX(snap_time), arg_max(spot, snap_time) AS spot,
+       arg_min(spot, snap_time) AS day_open,
+       MAX(spot) AS day_high, MIN(spot) AS day_low
+FROM options_data WHERE trade_date=? AND underlying=?
 ```
 
-> `arg_min(spot, snap_time)` returns the spot at the earliest snap — correct day open.
-
-### 1.6 `get_max_pain(conn, trade_date, snap_time, underlying, expiry_date) → dict`
-
-Max Pain is the strike price at which total option writer loss is minimised. Computed by finding the strike where total payout (sum of intrinsic values weighted by OI) is minimum:
-
-```sql
--- For each strike K, compute total payout:
--- CE payout = SUM(MAX(0, K - strike) * CE_OI) for all strikes below K
--- PE payout = SUM(MAX(0, strike - K) * PE_OI) for all strikes above K
--- Total payout = CE_payout + PE_payout
--- Max Pain = K with minimum total payout
-```
+`arg_min(spot, snap_time)` returns the spot at the earliest snap — correct day open.
 
 ---
 
-## 2. Cost-of-Carry — CoC (`analytics/coc.py`)
+## 2. Cost-of-Carry (`analytics/coc.py`)
 
-### 2.1 What is Cost-of-Carry?
-
-Cost-of-Carry (CoC) = `futures_price - spot_price`. In a rational market this should equal `spot * r * (DTE/365)`. Deviations reveal **institutional positioning**:
-
-- **Rising CoC** (positive V_CoC): Futures bid up vs spot → institutional long accumulation
-- **Falling CoC** (negative V_CoC): Futures sold vs spot → institutional unwinding/hedging
-
-### 2.2 `get_coc_latest(conn, trade_date, snap_time, underlying) → dict`
+### 2.1 `get_coc_latest(conn, trade_date, snap_time, underlying) → dict`
 
 ```sql
-SELECT
-    AVG(spot) AS spot,
-    AVG(futures_price) AS futures_price,
-    AVG(futures_price - spot) AS coc,
-    AVG(futures_price - spot) / NULLIF(AVG(spot), 0) * 100 AS coc_pct
+SELECT AVG(fut_price) AS fut_price, AVG(spot) AS spot,
+       AVG(fut_price) - AVG(spot) AS coc
 FROM options_data
-WHERE trade_date=? AND snap_time=? AND underlying=? AND expiry_tier='TIER1'
+WHERE trade_date=? AND snap_time=? AND underlying=? AND instrument_type='FUT'
 ```
 
-### 2.3 V_CoC — CoC Velocity (15-minute)
+### 2.2 V_CoC — 15-Minute Velocity (`_compute_vcoc`)
 
-V_CoC measures the **rate of change** of CoC over the last 15 minutes (3 snaps):
+Computes CoC diff over a **true 15-minute wall-clock window** (not a fixed row count):
 
 ```python
-# V_CoC = CoC(now) - CoC(15 min ago)
-v_coc_15m = coc_now - coc_15m_ago
+h, m = map(int, snap_time.split(":"))
+cutoff = f"{(h*60+m-15)//60:02d}:{(h*60+m-15)%60:02d}"
+# Query: snap_time >= cutoff AND snap_time <= snap_time, ORDER BY snap_time DESC
+v_coc = coc_rows[0][1] - coc_rows[-1][1]  # latest minus earliest in window
 ```
 
-| V_CoC | Signal | Interpretation |
-|---|---|---|
-| `> VCOC_BULL_THRESHOLD` | `VELOCITY_BULL` | Institutional long accumulation |
-| `< VCOC_BEAR_THRESHOLD` | `VELOCITY_BEAR` | Institutional unwinding |
-| Between thresholds | `STABLE` | No directional conviction |
+This handles feed gaps (e.g. missed snap) correctly — the window is always 15 real minutes, not 3 rows.
 
-### 2.4 ATM Order Book Imbalance (OBI)
+For the full-day series, `_compute_vcoc_from_series(rows, i)` uses a row-index offset derived from `settings.SCHEDULER_INTERVAL_SECONDS`:
 
-Measures bid/ask pressure at ATM strikes:
+```python
+interval = max(1, settings.SCHEDULER_INTERVAL_SECONDS // 60)  # minutes per snap
+lookback = max(1, 15 // interval)                             # rows for 15-min window
+```
+
+| V_CoC | Signal |
+|---|---|
+| `> VCOC_BULL_THRESHOLD` (default 10.0) | `VELOCITY_BULL` |
+| `< VCOC_BEAR_THRESHOLD` (default –10.0) | `VELOCITY_BEAR` |
+| Between | `STABLE` |
+
+### 2.3 ATM OBI (`get_atm_obi`) — Two-CTE Approach
+
+Uses two CTEs to find the exactly-ATM strike on a per-snap basis, avoiding the `LIMIT 4` skew:
 
 ```sql
+WITH spot_cte AS (SELECT AVG(spot) FROM options_data WHERE ...),
+     min_dist AS (SELECT MIN(ABS(strike_price - spot)) FROM options_data WHERE ... AND expiry_tier='TIER1')
 SELECT
-    (SUM(bid_qty) - SUM(ask_qty)) / NULLIF(SUM(bid_qty + ask_qty), 0) AS obi
-FROM options_data
-WHERE trade_date=? AND snap_time=? AND underlying=?
-  AND ABS(strike_price - spot) / spot < 0.005   -- Within 0.5% of spot
-  AND expiry_tier='TIER1'
+    SUM(CASE WHEN option_type='CE' THEN (bid_qty - ask_qty) ELSE 0 END) AS ce_flow,
+    SUM(CASE WHEN option_type='PE' THEN (bid_qty - ask_qty) ELSE 0 END) AS pe_flow,
+    SUM(bid_qty + ask_qty) AS total_qty
+FROM options_data WHERE ... AND ABS(strike_price - spot) = min_dist
 ```
 
-**OBI range:** `-1.0` (pure ask — selling pressure) to `+1.0` (pure bid — buying pressure)
+`OBI = (ce_flow - pe_flow) / total_qty` — range `[–1, +1]`.
 
-### 2.5 Futures OBI
-
-Same calculation but on the futures book (not options). Measures directional institutional intent through the futures market rather than options:
+### 2.4 Futures OBI (`get_futures_obi`)
 
 ```sql
--- Uses futures-specific bid/ask columns if available
--- Falls back to NULLIF-safe aggregate
+SELECT SUM(bid_qty - ask_qty) AS net_flow, SUM(bid_qty + ask_qty) AS total_qty
+FROM options_data WHERE ... AND instrument_type='FUT'
 ```
+
+`FUT_OBI = net_flow / total_qty`.
 
 ---
 
-## 3. Put-Call Ratio — PCR (`analytics/pcr.py`)
+## 3. PCR Analytics (`analytics/pcr.py`)
 
-### 3.1 PCR Vol and PCR OI
+### 3.1 `get_pcr(conn, trade_date, snap_time, underlying) → dict`
 
 ```sql
 SELECT
@@ -178,252 +153,221 @@ SELECT
     NULLIF(SUM(CASE WHEN option_type='CE' THEN volume ELSE 0 END), 0) AS pcr_vol,
     SUM(CASE WHEN option_type='PE' THEN oi ELSE 0 END) /
     NULLIF(SUM(CASE WHEN option_type='CE' THEN oi ELSE 0 END), 0)     AS pcr_oi
-FROM options_data
-WHERE trade_date=? AND snap_time=? AND underlying=? AND expiry_tier='TIER1'
+FROM options_data WHERE ... AND expiry_tier='TIER1'
 ```
 
-`NULLIF(..., 0)` prevents division-by-zero when CE volume/OI is zero.
+`pcr_divergence = pcr_vol - pcr_oi`
 
-### 3.2 PCR Divergence
+| Divergence | Signal |
+|---|---|
+| `> PCR_DIV_BULL_THRESHOLD` | `RETAIL_PANIC_PUTS` |
+| `< PCR_DIV_BEAR_THRESHOLD` | `RETAIL_PANIC_CALLS` |
+| `abs > 0.10` | `DIVERGENCE_BUILDING` |
+| Within | `BALANCED` |
 
-```python
-pcr_divergence = pcr_vol - pcr_oi
-```
+### 3.2 Smoothed OBI (full-day series)
 
-| Divergence | Signal | Meaning |
-|---|---|---|
-| `> PCR_DIV_BULL_THRESHOLD` | `RETAIL_PANIC_PUTS` | Retail buying puts in panic; smart money often fades this as bullish |
-| `< PCR_DIV_BEAR_THRESHOLD` | `RETAIL_PANIC_CALLS` | Retail buying calls in euphoria; smart money fades as bearish |
-| `abs > 0.10` | `DIVERGENCE_BUILDING` | Divergence widening but not at extreme |
-| Within range | `BALANCED` | No retail extreme |
-
-### 3.3 Smoothed OBI (Full-Day Series)
-
-The full-day PCR series computes a 3-snap (15-min) rolling average OBI using a SQL window function:
+The series uses a SQL window function — single query, no N+1:
 
 ```sql
-SELECT snap_time, pcr_vol, pcr_oi,
-    AVG(obi) OVER (
-        ORDER BY snap_time
-        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
-    ) AS smoothed_obi
-FROM (
-    SELECT snap_time, ...,
-        (SUM(bid_qty) - SUM(ask_qty)) / NULLIF(SUM(bid_qty + ask_qty), 0) AS obi
-    FROM options_data WHERE ... GROUP BY snap_time
-) sub
+AVG(obi) OVER (ORDER BY snap_time ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS smoothed_obi
 ```
+
+For the single-snap path, `_smoothed_obi()` fetches the last 3 snaps at or before `snap_time` and averages their OBI.
 
 ---
 
 ## 4. IV Analytics (`analytics/iv.py`)
 
-### 4.1 IV Rank (IVR)
+### 4.1 `get_ivr_ivp(conn, trade_date, snap_time, underlying) → dict`
 
-Measures where current IV sits relative to its 52-week high-low range:
-
-```
-IVR = (IV_current - IV_52w_low) / (IV_52w_high - IV_52w_low) × 100
-```
-
-- **IVR = 0**: Current IV at 52-week low (cheapest)
-- **IVR = 100**: Current IV at 52-week high (most expensive)
-
-### 4.2 IV Percentile (IVP)
-
-Measures the percentage of past days where IV was **lower** than today:
+**ATM IV** — uses a subquery to find the exact ATM strike (min distance from spot):
 
 ```sql
-WITH daily_iv AS (
-    SELECT trade_date, AVG(iv) AS avg_iv
-    FROM options_data
-    WHERE underlying=? AND expiry_tier='TIER1'
-      AND trade_date >= CAST(? AS DATE) - INTERVAL '252' DAY
-    GROUP BY trade_date
+WITH spot_cte AS (SELECT AVG(spot) FROM options_data WHERE ...)
+SELECT AVG(o.iv) FROM options_data o, spot_cte s
+WHERE ... AND ABS(o.strike_price - s.spot) = (
+    SELECT MIN(ABS(strike_price - s.spot)) FROM options_data WHERE ...
 )
-SELECT
-    AVG(iv) AS current_iv,
-    (SELECT COUNT(*) FROM daily_iv WHERE avg_iv < current_iv)
-    / NULLIF((SELECT COUNT(*) FROM daily_iv), 0) * 100.0 AS ivp
-FROM options_data WHERE trade_date=? AND snap_time=? ...
 ```
 
-> **Critical**: `IVP=0` is a valid reading (current IV is the lowest in history). All code uses explicit `if ivp is not None` checks — never `ivp or 100` which would wrongly treat IVP=0 as missing.
+**IVR** (IV Rank):
+```
+IVR = (atm_iv - iv_low) / (iv_high - iv_low) × 100
+```
+Where `iv_low`/`iv_high` are from the last `IV_LOOKBACK_DAYS` (default 252) trading days.
 
-### 4.3 IV Term Structure
+**IVP** (IV Percentile):
+```
+IVP = count(daily_avg_iv < atm_iv) / total_days × 100
+```
+**Guard**: Returns `None` when fewer than 20 days of history exist. Gate C5 then defaults to `ivp_val = 100.0` (conservative "not cheap" posture).
 
-Compares ATM IV across expiry tiers to determine term structure shape:
+**HV20** (20-day Historical Volatility):
+```sql
+-- Triple-nested to ensure LAG() runs over full history BEFORE the LIMIT 22 cut
+SELECT STDDEV(daily_ret) * SQRT(252) * 100 AS hv20 FROM (
+    SELECT daily_ret FROM (
+        SELECT LN(MAX(spot) / LAG(MAX(spot)) OVER (ORDER BY trade_date)) AS daily_ret
+        FROM options_data WHERE underlying=? AND trade_date<=?
+        GROUP BY trade_date ORDER BY trade_date DESC
+    ) all_rets LIMIT 22
+)
+```
 
-| Condition | Shape | Meaning |
-|---|---|---|
-| IV(TIER1) < IV(TIER2) | `CONTANGO` | Near-term cheaper; normal market |
-| IV(TIER1) ≈ IV(TIER2) | `FLAT` | No term premium |
-| IV(TIER1) > IV(TIER2) | `BACKWARDATION` | Near-term crisis premium; dangerous for buyers |
+### 4.2 Term Structure (`get_term_structure`) and Shape (`_classify_shape`)
+
+```python
+def _classify_shape(near_iv, far_iv) -> str:
+    if near_iv is None or far_iv is None or near_iv == 0:
+        return "FLAT"          # explicit None/zero guard — never `not near_iv`
+    ratio = far_iv / near_iv
+    if ratio > 1.05:   return "CONTANGO"
+    if ratio < 0.95:   return "BACKWARDATION"
+    return "FLAT"
+```
+
+> `near_iv == 0` guard prevents `ZeroDivisionError`. `near_iv is None or near_iv == 0` — never `not near_iv` which would misclassify a genuine zero IV.
 
 ---
 
-## 5. VEX/CEX — Vanna & Charm Exposure (`analytics/vex_cex.py`)
+## 5. VEX/CEX Analytics (`analytics/vex_cex.py`)
 
-### 5.1 Vanna Exposure (VEX)
-
-**Vanna** = d(Delta)/d(IV). When IV changes, dealers must re-hedge their delta.
-
-```
-VEX = SUM(vex_column) / 1,000,000   [expressed in ₹ millions]
-```
-
-| VEX Total | Signal | Mechanical Effect |
-|---|---|---|
-| `> VEX_BULL_THRESHOLD` | `VEX_BULLISH` | IV drop forces dealer buying (upward pressure) |
-| `< 0` | `VEX_BEARISH` | IV rise forces dealer selling (downward pressure) |
-| Near zero | `NEUTRAL` | No dominant vanna flow |
-
-### 5.2 Charm Exposure (CEX)
-
-**Charm** = d(Delta)/d(time). As time decays, dealers re-hedge their delta.
-
-```
-CEX = SUM(cex_column) / 1,000,000   [expressed in ₹ millions]
-```
-
-| CEX Total | Signal |
-|---|---|
-| `>= CEX_STRONG_BID` | `STRONG_CHARM_BID` — strong time-decay buying |
-| `>= CEX_BID` | `CHARM_BID` |
-| `<= CEX_PRESSURE` | `CHARM_PRESSURE` |
-| Between | `NEUTRAL` |
-
-### 5.3 Dealer O’Clock
-
-A special high-risk condition when DTE=1 and time approaches expiry:
-
-```python
-def _is_dealer_oclock(snap_time: str, dte: int) -> bool:
-    return dte <= settings.DEALER_OCLOCK_DTE and snap_time >= settings.DEALER_OCLOCK_START
-```
-
-When active:
-- Charm flows dominate all other signals
-- Gate C10 condition fails (1 point deducted)
-- Narrative warns explicitly
-- Pre-flight may block recommendation
-
-### 5.4 By-Strike Breakdown
-
-For the full VEX/CEX panel, `_get_by_strike()` uses a window function to compute moneyness:
+### 5.1 `get_vex_cex_current(conn, trade_date, snap_time, underlying) → dict`
 
 ```sql
-SELECT strike_price, option_type,
-    (strike_price - AVG(spot) OVER()) / AVG(spot) OVER() * 100 AS moneyness_pct,
-    SUM(vex)/1e6 AS vex_M, SUM(cex)/1e6 AS cex_M,
-    SUM(oi) AS oi, AVG(iv) AS iv, MIN(dte) AS dte
-FROM options_data
-WHERE ... GROUP BY strike_price, option_type ORDER BY strike_price
+SELECT SUM(vex)/1e6 AS vex_total_M,
+       SUM(cex)/1e6 AS cex_total_M,
+       AVG(spot), MIN(dte)
+FROM options_data WHERE ... AND expiry_tier='TIER1'
 ```
+
+### 5.2 VEX Classification (`_classify_vex`) — Per-Underlying Thresholds
+
+```python
+threshold = settings.VEX_THRESHOLDS.get(underlying, settings.VEX_BULL_THRESHOLD)
+if vex_total > threshold:   return "VEX_BULLISH"
+if vex_total < -threshold:  return "VEX_BEARISH"
+return "NEUTRAL"
+```
+
+Per-underlying thresholds are required because MIDCPNIFTY and NIFTYNXT50 have ~10× lower VEX magnitudes than BANKNIFTY.
+
+### 5.3 CEX Classification (`_classify_cex`) — Two-Level Thresholds
+
+```python
+strong_thr = settings.CEX_CHARM_THRESHOLD.get(underlying, settings.CEX_STRONG_BID)
+bid_thr    = settings.CEX_VANNA_THRESHOLD.get(underlying, settings.CEX_BID)
+```
+
+| CEX | Signal |
+|---|---|
+| `>= strong_thr` | `STRONG_CHARM_BID` |
+| `>= bid_thr` | `CHARM_BID` |
+| `<= -strong_thr` | `CHARM_PRESSURE` |
+| Between | `NEUTRAL` |
+
+### 5.4 Dealer O'Clock (`_is_dealer_oclock`)
+
+```python
+def _is_dealer_oclock(snap_time, dte, underlying, trade_date) -> bool:
+    if dte > settings.DEALER_OCLOCK_DTE:   return False
+    if snap_time < settings.DEALER_OCLOCK_START:  return False
+    expected_weekday = settings.EXPIRY_WEEKDAY.get(underlying, 3)  # 3=Thursday
+    return date.fromisoformat(trade_date).weekday() == expected_weekday
+```
+
+Uses `trade_date` (not wall-clock) so historical replay and backtests work correctly.
 
 ---
 
 ## 6. Strike Screener (`analytics/screener.py`)
 
-### 6.1 S-Score Composite
-
-The screener ranks all TIER1 strikes by a composite **S-Score** that measures option quality for buying:
-
-```
-S_Score = W_LIQUIDITY    × liquidity_score
-        + W_IV_QUALITY   × iv_quality_score
-        + W_DELTA_QUALITY × delta_quality_score
-        + W_SPREAD       × spread_score
-        + W_EFF_RATIO    × efficiency_ratio
-```
-
-All weights are configurable via settings.
-
-### 6.2 Component Calculations
-
-| Component | Formula | What It Measures |
-|---|---|---|
-| Liquidity | `volume / (oi + 1)` | Turnover rate — how actively traded |
-| IV Quality | `1 / (1 + iv)` | Lower IV = cheaper premium |
-| Delta Quality | `1 - abs(delta - target_delta)` | Proximity to target delta (e.g. 0.35) |
-| Spread | `1 - (ask_qty - bid_qty) / (ask_qty + bid_qty + 1)` | Bid-ask balance |
-| Efficiency Ratio | `abs(delta) / (theta * sqrt(dte + 1))` | Delta per unit of time decay |
-
-### 6.3 SQL Query
+### 6.1 S_Score — 7-Factor Composite (maximum 150)
 
 ```sql
-SELECT strike_price, option_type, ltp, iv, delta, theta, gamma, vega, dte,
-       expiry_date, oi, volume,
-       (
-         ? * volume / (oi + 1) +
-         ? * 1.0/(1.0 + iv) +
-         ? * (1.0 - ABS(delta - ?)) +
-         ? * (1.0 - ABS(bid_qty - ask_qty) / NULLIF(bid_qty + ask_qty, 0)) +
-         ? * ABS(delta) / NULLIF(ABS(theta) * SQRT(dte + 1), 0)
-       ) AS s_score
-FROM options_data
-WHERE trade_date=? AND snap_time=? AND underlying=?
-  AND expiry_tier='TIER1'
-  AND ltp > 0 AND oi > 0 AND delta IS NOT NULL
-ORDER BY s_score DESC
-LIMIT ?
+(
+    W_DELTA    × ABS(o.delta)
+  + W_THETA    × (1 - LEAST(1, ABS(o.theta)/NULLIF(o.ltp,0)/0.05))   -- theta efficiency cap 5%
+  + W_LIQUIDITY × LEAST(1, o.oi*o.ltp/1e7/5.0)                       -- cap 5 Cr
+  + W_IV       × (1 - LEAST(1, o.iv/100.0))                          -- lower IV preferred
+  + W_GAMMA    × LEAST(1, ABS(o.gamma)*100)                           -- cap 0.01
+  + W_VEGA     × LEAST(1, ABS(o.vega)/50.0)                          -- cap 50
+  + W_EFF_RATIO× (1 - LEAST(1, ABS(o.theta)/NULLIF(o.ltp,0)/0.10))   -- eff ratio cap 10%
+) × 10 AS s_score
 ```
 
-Returns top `N` strikes (default 20, configurable 5–50) sorted by S-Score descending.
+Default weights (`config.py`): W_DELTA=4, W_THETA=2, W_LIQUIDITY=3, W_IV=2, W_GAMMA=1, W_VEGA=1, W_EFF_RATIO=4.
+
+Theoretical max = (4+2+3+2+1+1+4)×10 = 170, but delta capped at 0.50 by the filter → typical max ~150.
+
+### 6.2 Filters Applied Before Ranking
+
+```sql
+AND ABS((strike_price - spot) / spot * 100) <= SCREENER_MAX_MONEYNESS_PCT   -- default 5%
+AND ABS(o.delta) BETWEEN SCREENER_MIN_DELTA AND SCREENER_MAX_DELTA           -- default 0.10–0.50
+AND o.oi * o.ltp / 1e7 >= SCREENER_MIN_LIQUIDITY_CR                         -- default 0.5 Cr
+AND o.ltp > 0
+```
+
+### 6.3 Star Ratings
+
+| Stars | S_score Threshold |
+|---|---|
+| ⭐⭐⭐⭐ | ≥ STAR_4_THRESHOLD (default 100) |
+| ⭐⭐⭐ | ≥ STAR_3_THRESHOLD (default 80) |
+| ⭐⭐ | ≥ STAR_2_THRESHOLD (default 60) |
+| ⭐ | < 60 |
 
 ---
 
-## 7. Microstructure (`analytics/microstructure.py`)
+## 7. Environment Gate (`analytics/environment.py`)
 
-### 7.1 Volume Velocity
+Documented fully in **Part 7: Environment Gate**.
 
-Detects unusual volume spikes using a rolling median:
+---
 
-```sql
-SELECT snap_time,
-    SUM(volume) AS total_volume
-FROM options_data
-WHERE trade_date=? AND underlying=? AND expiry_tier='TIER1'
-  AND snap_time <= ?
-GROUP BY snap_time
-ORDER BY snap_time
-```
+## 8. PnL Analytics (`analytics/pnl.py`)
+
+### 8.1 Theta-SL Series (`compute_theta_sl`)
+
+Computes the minimum acceptable LTP at each snap to compensate for theta decay:
 
 ```python
-rolling_median = median(last_N_volumes)   # N = VOLUME_LOOKBACK_SNAPS
-volume_ratio   = current_volume / (rolling_median or 1)
-
-signal = "SPIKE"  if volume_ratio >= VOLUME_SPIKE_RATIO else "NORMAL"
+def compute_theta_sl(entry_premium, theta, snaps_since_entry):
+    cumulative_theta_loss = abs(theta) * (snaps_since_entry * interval_hours)
+    return max(0.0, entry_premium - cumulative_theta_loss) * (1 - AI_SL_PCT)
 ```
 
-### 7.2 Order Flow Toxicity
+### 8.2 Greek PnL Attribution (`compute_pnl_attribution`)
 
-A high bid-ask spread combined with high volume indicates informed trading (toxic flow):
+Decomposes total PnL into Greeks and an unexplained residual:
 
 ```python
-# If OBI is extreme AND volume is spiking — likely institutional block
-toxic = abs(obi) > OBI_TOXICITY_THRESHOLD and signal == "SPIKE"
+delta_pnl   = delta * (spot_now - spot_entry) * lot
+gamma_pnl   = 0.5 * gamma * (spot_now - spot_entry)**2 * lot
+vega_pnl    = vega * (iv_now - iv_entry) * lot
+theta_pnl   = theta * elapsed_days * lot
+unexplained = total_pnl - (delta_pnl + gamma_pnl + vega_pnl + theta_pnl)
 ```
 
 ---
 
-## 8. Analytics Call Hierarchy
+## 9. Analytics Query Count Per Gate Evaluation
 
-All analytics functions called by `get_environment_score()` in a single tick:
+All calls made by `get_environment_score()` per tick per underlying:
 
 ```
 get_environment_score()
-    ├─ get_net_gex()           ── 1 DuckDB query
-    ├─ get_coc_latest()        ── 1 DuckDB query
-    │   └─ [internal] 15m lag  ── 1 DuckDB query
-    ├─ get_ivr_ivp()           ── 2 DuckDB queries (current + CTE history)
-    ├─ get_pcr()               ── 1 DuckDB query
-    │   └─ _smoothed_obi()     ── 1 DuckDB query
-    ├─ get_vex_cex_current()   ── 1 DuckDB query
-    ├─ get_atm_obi()           ── 1 DuckDB query
-    └─ get_futures_obi()       ── 1 DuckDB query
-                                  ───────────────
-                                  ~9 DuckDB queries per gate evaluation
+    ├─ get_net_gex()           — 2 queries (current snap + peak scan)
+    ├─ get_coc_latest()        — 1 query + _compute_vcoc (1 query)
+    ├─ get_ivr_ivp()           — 2 queries (current ATM IV + history CTE)
+    ├─ get_pcr()               — 1 query + _smoothed_obi (1 query)
+    ├─ get_vex_cex_current()   — 1 query
+    ├─ get_atm_obi()           — 1 query (3-CTE)
+    └─ get_futures_obi()       — 1 query
+                                  ─────────────
+                                  ~11 queries per gate evaluation
 ```
 
-All queries are parameterised, lightweight columnar scans. On typical intraday data (~75 snaps, ~5000 rows per snap) each query completes in <10ms.
+`_build_gate_cache()` in the scheduler runs this once per unique underlying per tick, so `track_open_positions()` reuses the cached result at zero query cost.

@@ -2,6 +2,7 @@
 import duckdb
 from loguru import logger
 from optdash.config import settings
+from optdash.metrics import record_error
 
 
 def get_pcr(
@@ -37,6 +38,7 @@ def get_pcr(
             "signal":       _pcr_signal(div),
         }
     except Exception as e:
+        record_error("get_pcr")
         logger.warning("get_pcr error: {}", e)
         return {}
 

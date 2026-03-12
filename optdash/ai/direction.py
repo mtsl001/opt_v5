@@ -161,9 +161,12 @@ def _is_vcoc_spike_active(
         n         = settings.VCOC_SPIKE_EXPIRY_SNAPS
         threshold = abs(settings.VCOC_BULL_THRESHOLD)
 
+        # Issue-5: derive snap interval from config instead of hardcoding 5.
+        interval  = max(1, settings.SCHEDULER_INTERVAL_SECONDS // 60)
+
         # Compute earliest minute we need for any 15-min lookback anchor
         h, m         = map(int, snap_time.split(":"))
-        earliest_min = max(0, h * 60 + m - n * 5 - 15)
+        earliest_min = max(0, h * 60 + m - n * interval - 15)
         cutoff       = f"{earliest_min // 60:02d}:{earliest_min % 60:02d}"
 
         rows = conn.execute("""

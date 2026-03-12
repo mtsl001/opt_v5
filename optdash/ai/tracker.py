@@ -86,7 +86,7 @@ def track_open_positions(
         if pnl_pct >= settings.TRAILING_STOP_ACTIVATION * 100:
             peak_ltp = snaps.get_peak_ltp(jconn, trade["id"])
             if peak_ltp is not None:
-                dynamic_trail   = peak_ltp * 0.90
+                dynamic_trail   = peak_ltp * (1.0 - settings.TRAILING_STOP_TRAIL_PCT)
                 trail_sl        = max(dynamic_trail, sl_adjusted)
                 trailing_active = dynamic_trail > sl_adjusted
             else:
@@ -283,7 +283,9 @@ def _minutes_since_entry(entry_snap: str, current_snap: str) -> int:
 
 
 def _snaps_since(entry_snap: str, current_snap: str) -> int:
-    return _minutes_since_entry(entry_snap, current_snap) // 5
+    # Issue-3: derive interval from config instead of hardcoding 5 minutes.
+    interval = max(1, settings.SCHEDULER_INTERVAL_SECONDS // 60)
+    return _minutes_since_entry(entry_snap, current_snap) // interval
 
 
 def _consecutive_no_go_count(jconn: sqlite3.Connection, trade_id: int) -> int:

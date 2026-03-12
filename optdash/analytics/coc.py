@@ -2,6 +2,7 @@
 import duckdb
 from loguru import logger
 from optdash.config import settings
+from optdash.metrics import record_error
 
 
 def get_coc_latest(conn: duckdb.DuckDBPyConnection, trade_date: str,
@@ -29,6 +30,7 @@ def get_coc_latest(conn: duckdb.DuckDBPyConnection, trade_date: str,
             "coc": round(coc, 2), "v_coc_15m": round(vcoc, 2), "signal": signal,
         }
     except Exception as e:
+        record_error("get_coc_latest")
         logger.warning("get_coc_latest error: {}", e)
         return {}
 
@@ -168,14 +170,14 @@ def _compute_vcoc(conn: duckdb.DuckDBPyConnection, trade_date: str,
 def _compute_vcoc_from_series(rows: list, i: int) -> float:
     """V_CoC from pre-fetched series (used in get_coc_series).
 
-    Uses index-3 (3 rows back = 15 min at 5-min cadence) for performance;
-    feed-gap risk does not apply here because the series is fetched in one
-    query over the complete day -- any gap in the source data produces a
-    gap entry in `rows` itself, which the caller can filter if needed.
+    Issue-10: lookback derived from SCHEDULER_INTERVAL_SECONDS so the 15-min
+    V_CoC window remains correct at non-5-min tick intervals.
     """
-    if i < 3:
+    interval = max(1, settings.SCHEDULER_INTERVAL_SECONDS // 60)
+    lookback = max(1, 15 // interval)
+    if i < lookback:
         return 0.0
-    return round((rows[i][1] or 0) - (rows[i - 3][1] or 0), 2)
+    return round((rows[i][1] or 0) - (rows[i - lookback][1] or 0), 2)
 
 
 def _coc_signal(coc: float, vcoc: float) -> str:

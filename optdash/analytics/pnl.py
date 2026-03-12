@@ -2,6 +2,7 @@
 from typing import Any
 from loguru import logger
 from optdash.config import settings
+from optdash.utils import snap_to_min
 
 
 def compute_theta_sl(entry_premium: float, theta: float, minutes_elapsed: int) -> float:
@@ -154,13 +155,8 @@ def build_theta_sl_series(trade: dict, snaps: list[dict]) -> list[dict]:
     return result
 
 
-def _snap_to_min(t: str) -> int:
-    """Convert 'HH:MM' to integer minutes-since-midnight."""
-    try:
-        h, m = map(int, t[:5].split(":"))
-        return h * 60 + m
-    except Exception:
-        return 9 * 60 + 15   # fallback: treat as market open
+# Issue-9: delegated to shared optdash.utils.snap_to_min.
+_snap_to_min = snap_to_min
 
 
 def _minutes_between(t1: str, t2: str) -> int:

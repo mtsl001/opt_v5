@@ -393,6 +393,10 @@ class Settings(BaseSettings):
         return v
 
     TRAILING_STOP_ACTIVATION:   float = 0.20
+    # Issue-2: trail-down percentage once trailing stop is activated.
+    # 0.10 = trailing SL set at peak_ltp × (1 − 0.10) = peak × 0.90.
+    # Override via TRAILING_STOP_TRAIL_PCT= in .env for strategy tuning.
+    TRAILING_STOP_TRAIL_PCT:    float = 0.10
     GATE_SUSTAINED_NO_GO_SNAPS: int   = 2
 
     SESSION_MIDDAY_CONFIDENCE_PENALTY: int = 10

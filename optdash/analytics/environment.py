@@ -8,17 +8,11 @@ from optdash.analytics.coc import get_coc_latest, get_atm_obi, get_futures_obi
 from optdash.analytics.iv  import get_ivr_ivp
 from optdash.analytics.pcr import get_pcr
 from optdash.analytics.vex_cex import get_vex_cex_current
+from optdash.utils import snap_to_min
 
 
-def _snap_to_min(t: str) -> int:
-    """Convert 'HH:MM' to integer minutes-since-midnight.
-
-    Using integer arithmetic makes all session boundary comparisons immune to
-    zero-padding differences (e.g. '9:15' vs '09:15') that would silently
-    mis-classify a session under lexicographic string comparison.
-    """
-    h, m = map(int, t.split(":"))
-    return h * 60 + m
+# Issue-9: delegated to shared optdash.utils.snap_to_min.
+_snap_to_min = snap_to_min
 
 
 def get_environment_score(

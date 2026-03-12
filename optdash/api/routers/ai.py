@@ -3,12 +3,12 @@ import json
 import sqlite3
 import threading
 import time
-from typing import Annotated
 from fastapi import APIRouter, Depends, Query, HTTPException
 from loguru import logger
-from pydantic import BaseModel, StringConstraints, field_validator
+from pydantic import BaseModel, field_validator
 
 from optdash.api.deps import get_journal
+from optdash.api.validators import SnapTime    # Issue-8: single source of truth
 from optdash.ai.journal import trades, shadow, snaps
 from optdash.ai.learning.report import build_learning_report
 from optdash.analytics.pnl import build_theta_sl_series
@@ -17,15 +17,6 @@ from optdash.models import TradeStatus, ExitReason
 
 router = APIRouter()
 
-# HH:MM 24-hour clock -- validated at API boundary so downstream snap-time
-# arithmetic never receives a malformed string.
-SnapTime = Annotated[
-    str,
-    StringConstraints(
-        pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$",
-        strip_whitespace=True,
-    ),
-]
 
 
 # -- Request schemas ----------------------------------------------------------

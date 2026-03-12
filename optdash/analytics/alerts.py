@@ -3,6 +3,7 @@ import duckdb
 from loguru import logger
 from optdash.config import settings
 from optdash.models import AlertType, AlertSeverity
+from optdash.metrics import record_error
 from optdash.analytics.gex import get_gex_series
 from optdash.analytics.coc import get_coc_series
 from optdash.analytics.pcr import get_pcr_series
@@ -127,6 +128,7 @@ def get_alerts(
             ))
 
     except Exception as e:
+        record_error("get_alerts")
         logger.warning("get_alerts error: {}", e)
 
     seen = set()

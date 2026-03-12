@@ -17,6 +17,7 @@ from loguru import logger
 from optdash.config import settings
 from optdash.api.deps import startup, shutdown
 from optdash.api.routers import market, micro, screener, ai, ws
+from optdash.metrics import get_error_counts
 
 # Single source of truth: pyproject.toml [project] version.
 # Falls back to the last known version when the package is not installed
@@ -83,6 +84,14 @@ def create_app(lifespan: Any = None) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "version": _APP_VERSION}
+        errors = get_error_counts()
+        return {
+            "status": "ok",
+            "version": _APP_VERSION,
+            # Issue-11: surface analytics error counts so operational issues
+            # (silent empty returns from swallowed exceptions) are detectable
+            # without searching through log files.
+            "analytics_errors": errors if errors else None,
+        }
 
     return app

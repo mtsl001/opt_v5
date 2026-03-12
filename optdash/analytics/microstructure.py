@@ -1,6 +1,7 @@
 """Microstructure analytics -- volume velocity."""
 import duckdb
 from loguru import logger
+from optdash.metrics import record_error
 
 
 def get_volume_velocity(conn: duckdb.DuckDBPyConnection, trade_date: str,
@@ -47,5 +48,6 @@ def get_volume_velocity(conn: duckdb.DuckDBPyConnection, trade_date: str,
             })
         return result
     except Exception as e:
+        record_error("get_volume_velocity")
         logger.warning("get_volume_velocity error: {}", e)
         return []

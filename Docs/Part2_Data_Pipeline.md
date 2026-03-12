@@ -4,281 +4,219 @@
 
 ## 1. Overview
 
-OptDash does not connect to a live broker API during analytics. Instead, it reads from pre-built **Parquet snapshot files** that are deposited into a configurable `DATA_ROOT` directory by an external feed process. DuckDB provides a zero-copy columnar SQL interface over these files via an in-memory view.
+OptDash pulls live NSE options chain data from **BigQuery** (BQ) via an incremental watermark-based pull on every scheduler tick. Pulled data is enriched with Greeks, dealer exposure columns, and expiry tiers, then written to **per-underlying Parquet files** under `data/processed/`. DuckDB reads this directory as an in-process columnar view for all analytics.
 
-This design decouples the data feed from the analytics engine — OptDash never crashes due to broker API issues, and all analytics remain fully testable with historical data.
-
----
-
-## 2. Data Root Structure
-
-Parquet files are expected to follow a **Hive-style partition layout**:
-
-```
-DATA_ROOT/
-├── trade_date=2026-03-04/
-│   ├── NIFTY_09:15.parquet
-│   ├── NIFTY_09:20.parquet
-│   ├── BANKNIFTY_09:15.parquet
-│   └── ...
-├── trade_date=2026-03-03/
-│   └── ...
-└── ...
-```
-
-> The glob pattern `DATA_ROOT/**/*.parquet` matches all files recursively. DuckDB's `hive_partitioning=true` automatically parses `trade_date` from the directory name as a column.
+This design decouples feed ingestion from analytics computation — analytics never wait for a network call, and historical data is always available for replay and backtesting.
 
 ---
 
-## 3. DuckDB Gateway (`pipeline/duckdb_gateway.py`)
+## 2. Processed Parquet Layout
 
-### 3.1 Connection Strategy
+Parquet files follow a **Hive partition layout**:
+
+```
+data/
+└── processed/
+    ├── trade_date=2026-03-12/
+    │   ├── NIFTY.parquet           ← all snaps for NIFTY on that day
+    │   ├── BANKNIFTY.parquet
+    │   ├── FINNIFTY.parquet
+    │   ├── MIDCPNIFTY.parquet
+    │   └── NIFTYNXT50.parquet
+    ├── trade_date=2026-03-11/
+    │   └── ...
+    └── raw/                        ← raw BQ extract (separate, NOT read by DuckDB view)
+        └── trade_date=2026-03-12/
+            └── *.parquet
+```
+
+DuckDB extracts `trade_date` automatically from the hive directory name. Each file contains all snaps for one underlying for one day.
+
+> **Important**: DuckDB reads only `data/processed/`. The `data/raw/` subtree has a different schema (no Greeks, no enriched columns) and must never be included in the view.
+
+---
+
+## 3. Live BQ Incremental Pull (`pipeline/incremental.py`)
+
+Every scheduler tick calls `run_incremental_pull(duck_conn)`:
+
+```
+run_incremental_pull()
+    │
+    ├─ Query BQ for rows newer than last watermark
+    ├─ Enrich via processor.process_snapshot()
+    ├─ Write to data/processed/trade_date=.../UNDERLYING.parquet
+    │   (merge with existing day file, filelock for concurrency safety)
+    └─ If new trade_date partition created: refresh_views(duck_conn)
+       (makes new-day data visible to DuckDB without process restart)
+```
+
+The pull is non-blocking — run via `asyncio.to_thread()` in the scheduler tick so it never delays the event loop.
+
+---
+
+## 4. Data Enrichment (`pipeline/processor.py`)
+
+The processor enriches raw BQ options data with:
+
+| Enrichment Column | Source / Formula |
+|---|---|
+| `gex` | `gamma × oi × spot² × 0.01` (sign: CE=positive, PE=negative) |
+| `vex` | Vanna × OI (per Black-Scholes) |
+| `cex` | Charm × OI (per Black-Scholes) |
+| `expiry_tier` | `TIER1` (nearest expiry), `TIER2`, `TIER3` |
+| `dte` | Calendar days to expiry |
+| `bid_qty` / `ask_qty` | Mapped from `total_buy_qty` / `total_sell_qty` |
+| `instrument_type` | `OPT` for options, `FUT` for futures rows |
+
+PyArrow writes files with a canonical schema enforced at write time. `filelock` serialises any concurrent write access to the same Parquet file.
+
+---
+
+## 5. DuckDB Gateway (`pipeline/duckdb_gateway.py`)
+
+### 5.1 Connection & PRAGMAs
 
 ```python
 _conn = duckdb.connect(database=":memory:", read_only=False)
-_conn.execute("PRAGMA threads=4")
-_conn.execute("PRAGMA memory_limit='2GB'")
+_conn.execute(f"PRAGMA threads={settings.DUCKDB_THREADS}")         # default 4
+_conn.execute(f"PRAGMA memory_limit='{settings.DUCKDB_MEMORY_LIMIT}'")  # default '2GB'
 ```
 
-- **In-memory only**: No DuckDB file is written — all data lives in RAM
-- **`read_only=False`**: Required for `CREATE OR REPLACE VIEW` DDL
-- **4 threads**: Parallelises columnar scans across CPU cores
-- **2GB memory limit**: Prevents runaway queries from OOM-killing the process
+### 5.2 LockedConn — Thread-Safe Proxy
 
-### 3.2 View Registration
+All callers receive a `LockedConn` proxy instead of the raw `DuckDBPyConnection`:
 
 ```python
-conn.execute(
+class LockedConn:
+    def execute(self, query, parameters=None):
+        _view_lock.acquire()
+        try:
+            return self._real.execute(query, parameters)
+        finally:
+            _view_lock.release()
+```
+
+`_view_lock` is a `threading.RLock`. This serialises all analytics queries and blocks them during `refresh_views()` when the catalog entry is momentarily absent during `CREATE OR REPLACE VIEW`. **No caller needs to acquire the lock explicitly** — it is structural.
+
+### 5.3 View Registration
+
+```python
+real.execute(
     "CREATE OR REPLACE VIEW options_data AS "
     "SELECT * FROM read_parquet($1, hive_partitioning=true, union_by_name=true)",
-    [parquet_glob],
+    [globs],   # list of per-day *.parquet glob strings
 )
 ```
 
 **Key parameters:**
-- `$1` parameter binding — path never interpolated into SQL string (prevents injection)
-- `hive_partitioning=true` — DuckDB auto-detects `trade_date=YYYY-MM-DD` directories
-- `union_by_name=true` — Parquet files with different column sets are schema-merged by name; missing columns become NULL instead of causing errors (critical for optional `vex`/`cex` columns)
-- `CREATE OR REPLACE` — safe to re-register if `DATA_ROOT` changes without restart
+- `$1` — path never interpolated into SQL; prevents injection
+- `hive_partitioning=true` — auto-detects `trade_date=YYYY-MM-DD` from directory name
+- `union_by_name=true` — merges Parquet files with different column sets by name; missing columns become NULL
+- `globs` — rolling window of the last `DUCK_VIEW_LOOKBACK_DAYS` calendar days (default 5)
 
-### 3.3 Lifecycle
+### 5.4 Rolling Window (`_build_rolling_globs`)
 
+Only the most recent `DUCK_VIEW_LOOKBACK_DAYS` directories are included in the view. This bounds Parquet scan time and memory regardless of how long the service has been running.
+
+```python
+today = datetime.now(IST).date()   # IST-aware, never system-local
+for i in range(lookback_days):
+    d = today - timedelta(days=i)
+    day_dir = processed / f"trade_date={d:%Y-%m-%d}"
+    if day_dir.exists():
+        globs.append(str(day_dir / "*.parquet"))
 ```
-startup()  ──▶  _conn created + view registered
-               │
-               ▼
-           API and Scheduler both call get_conn()
-               │
-               ▼
- shutdown()  ──▶  _conn.close() + _conn = None
+
+### 5.5 Schema Validation
+
+After each `refresh_views()`, `_validate_view_schema()` checks that all `REQUIRED_COLUMNS` are present:
+
+```python
+REQUIRED_COLUMNS = frozenset({
+    "trade_date", "snap_time", "underlying", "strike_price", "expiry_date",
+    "option_type", "instrument_type", "ltp", "iv", "delta", "theta",
+    "gamma", "vega", "spot", "fut_price", "oi", "volume",
+    "bid_qty", "ask_qty",       # OBI columns
+    "gex", "vex", "cex",        # dealer exposure
+    "expiry_tier", "dte",
+})
 ```
 
-### 3.4 Connection Sharing
+On startup (`raise_on_error=True`) a missing column crashes the process immediately. On EOD refresh it only logs an error.
 
-The single `_conn` instance is shared between:
-- **FastAPI API layer** (`deps.py` wires `app.state.duck = get_duck_conn()`)
-- **APScheduler tick** (passed directly to all analytics and AI functions)
+### 5.6 View Refresh at Day Rollover
 
-This guarantees both layers always read the same live Parquet dataset.
-
-> **Important**: DuckDB in-memory connections are NOT thread-safe by default. APScheduler uses `max_instances=1` and `coalesce=True` to ensure only one tick runs at a time. The FastAPI async workers share the connection but DuckDB's internal GIL-like locking handles concurrent read queries safely.
+`refresh_views(duck)` is called at EOD so the new day's partition directory becomes visible on the first tick after midnight without a process restart.
 
 ---
 
-## 4. Ingestion Utilities (`pipeline/ingestion.py`)
+## 6. Ticker Tick Steps (Scheduler)
 
-These are pure read-only helpers that resolve time/date coordinates from `options_data`.
+The scheduler tick (`optdash/scheduler.py`) runs every `SCHEDULER_INTERVAL_SECONDS` (default 300 s) and executes these steps in order, each yielding to the event loop between steps:
 
-### 4.1 `get_latest_snap(conn, trade_date, underlying) → str | None`
-
-Returns the most recent `snap_time` for a given date and underlying.
-
-```sql
-SELECT MAX(snap_time) AS latest
-FROM options_data
-WHERE trade_date = ? AND underlying = ?
+```
+tick()
+    ├─ Step 0: run_incremental_pull()   [BQ pull → Parquet, asyncio.to_thread]
+    │   (non-fatal: exception logged, tick continues)
+    │
+    ├─ EOD block (once/day when _is_eod() and not _eod_done_today()):
+    │   ├─ eod_force_close(duck, jconn, trade_date)
+    │   ├─ finalize_all_shadows(duck, jconn, trade_date)
+    │   ├─ purge_old_raw_parquets(DATA_ROOT, RAW_PARQUET_RETENTION_DAYS)
+    │   ├─ refresh_views(duck)
+    │   └─ done_flags[trade_date] = True  (prevents re-entry)
+    │
+    ├─ Step 1: expire_stale_recommendations(jconn, trade_date, snap_time)
+    ├─ Step 2: _build_gate_cache(duck, trade_date, snap_time, jconn, _gex_peak_cache)
+    ├─ Step 3: generate_recommendation() × each UNDERLYING
+    ├─ Step 4: track_open_positions(duck, jconn, trade_date, snap_time, gate_cache)
+    └─ Step 5: track_shadow_positions(duck, jconn, trade_date, snap_time)
 ```
 
-Used by the WebSocket endpoint and frontend to auto-select the latest available snap.
-
-### 4.2 `get_available_dates(conn, underlying) → list[str]`
-
-Returns all distinct `trade_date` values in descending order.
-
-```sql
-SELECT DISTINCT trade_date
-FROM options_data
-WHERE underlying = ?
-ORDER BY trade_date DESC
-```
-
-### 4.3 `get_snap_times(conn, trade_date, underlying) → list[str]`
-
-Returns all snap times for a day in ascending order. Used by the frontend timeline slider.
-
-```sql
-SELECT DISTINCT snap_time
-FROM options_data
-WHERE trade_date = ? AND underlying = ?
-ORDER BY snap_time ASC
-```
-
-### 4.4 `get_available_underlyings(conn, trade_date) → list[str]`
-
-Returns all underlyings available on a given trade date.
-
-```sql
-SELECT DISTINCT underlying
-FROM options_data
-WHERE trade_date = ?
-ORDER BY underlying
-```
-
-### 4.5 `_safe_query(conn, sql, params) → list[dict]`
-
-Executes a DuckDB query with graceful handling of missing optional columns.
-
-```python
-try:
-    result = conn.execute(sql, params or [])
-    cols = [d[0] for d in result.description]
-    return [dict(zip(cols, row)) for row in result.fetchall()]
-except Exception as e:
-    if "does not exist" in str(e).lower() or "catalog error" in str(e).lower():
-        return []   # Optional column missing in older Parquet files
-    raise           # Re-raise unexpected errors
-```
-
-This pattern is used by `vex_cex.py` to handle Parquet files that predate the `vex`/`cex` column additions.
+Each step is wrapped in its own `try/except` at the underlying level so a failure in one underlying never blocks the next.
 
 ---
 
-## 5. Pipeline Scheduler (`pipeline/scheduler.py`)
+## 7. Snap Time Calculation
 
-### 5.1 Job Configuration
-
-```python
-_scheduler.add_job(
-    func=lambda: _run_tick(conn, jconn),
-    trigger=CronTrigger(
-        minute="*/5",        # Every 5 minutes
-        hour="9-15",         # 09:00 through 15:59 (covers 09:15 – 15:30)
-        day_of_week="mon-fri",
-        timezone=IST,
-    ),
-    id="market_tick",
-    max_instances=1,         # Prevents overlapping ticks
-    coalesce=True,           # Merges missed ticks into single catch-up
-)
-```
-
-### 5.2 Market Hours Guard
-
-Even though the CronTrigger limits firing to `hour=9-15`, an additional runtime check prevents processing outside official market hours:
+The scheduler always computes the canonical snap time by rounding down to the nearest interval:
 
 ```python
-def _is_market_hours(now: datetime) -> bool:
-    t = now.time()
-    open_h, open_m   = map(int, settings.MARKET_OPEN.split(":"))
-    close_h, close_m = map(int, settings.MARKET_CLOSE.split(":"))
-    return time(open_h, open_m) <= t <= time(close_h, close_m)
+def _snap_time_str() -> str:
+    now = _now_ist()
+    interval_mins = max(1, settings.SCHEDULER_INTERVAL_SECONDS // 60)
+    mins = (now.minute // interval_mins) * interval_mins
+    return f"{now.hour:02d}:{mins:02d}"
 ```
 
-Default: `MARKET_OPEN=09:15`, `MARKET_CLOSE=15:30`.
-
-### 5.3 Tick Execution Order
-
-Each tick executes the following steps in order. Each step is individually wrapped in `try/except` so a failure in one step never prevents subsequent steps from running:
-
-```
-_run_tick(conn, jconn)
-    │
-    ├─ Step 1: track_open_positions()
-    │     For every ACCEPTED trade:
-    │     ├─ Fetch current LTP, IV, Greeks from options_data
-    │     ├─ Compute PnL (vs actual_entry_price)
-    │     ├─ Compute theta-adjusted SL
-    │     ├─ Compute trailing stop
-    │     ├─ Check IV crush severity
-    │     ├─ Run environment gate check
-    │     ├─ Insert position_snap
-    │     └─ Auto-close if SL/Target/Gate/IV triggered
-    │
-    ├─ Step 2: track_shadow_positions()
-    │     For every shadow (rejected) trade:
-    │     ├─ Fetch current LTP from options_data
-    │     └─ Compute counterfactual PnL
-    │
-    ├─ Step 3: expire_stale_recommendations()
-    │     For every GENERATED trade older than AI_EXPIRY_MAX_SNAPS:
-    │     └─ Update status to EXPIRED
-    │
-    ├─ Step 4: generate_recommendation() × 5 underlyings
-    │     For NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, NIFTYNXT50:
-    │     ├─ Skip if open/pending trade exists
-    │     ├─ Run full analytics pipeline
-    │     └─ Issue trade card if all checks pass
-    │
-    ├─ Step 5a: eod_force_close()         [fires at EOD_FORCE_CLOSE_TIME exactly]
-    │     Close all ACCEPTED trades at market price
-    │
-    └─ Step 5b: finalize_all_shadows()    [fires at EOD_SWEEP_TIME exactly]
-          Compute final shadow PnL, assign outcomes
-```
-
-### 5.4 EOD Timing
-
-EOD functions use **strict equality** (`==`) not `>=` to fire exactly once:
-
-```python
-# Fires at exactly e.g. "15:20" — not at 15:20, 15:25, 15:30...
-if snap_time == settings.EOD_FORCE_CLOSE_TIME:
-    eod_force_close(conn, jconn, trade_date)
-
-if snap_time == settings.EOD_SWEEP_TIME:
-    finalize_all_shadows(conn, jconn, trade_date)
-```
-
-Defaults: `EOD_FORCE_CLOSE_TIME=15:25`, `EOD_SWEEP_TIME=15:30`.
+This ensures the snap key always matches the keys written by the BQ pipeline.
 
 ---
 
-## 6. Parquet File Refresh
-
-The external feed process writes new Parquet files to `DATA_ROOT` every 5 minutes. DuckDB's `read_parquet()` view re-scans the glob on every query — there is no caching of directory listings. New files become visible to queries immediately without requiring a restart.
-
-```
-External Feed (every 5 min)
-    │  writes: DATA_ROOT/trade_date=2026-03-04/NIFTY_09:20.parquet
-    ▼
-DuckDB glob scan (next query)
-    │  discovers new file automatically
-    ▼
-Analytics sees latest snap
-```
-
----
-
-## 7. Error Handling Strategy
+## 8. Error Handling
 
 | Scenario | Behaviour |
-|---|---|  
-| `DATA_ROOT` does not exist at startup | Warning logged, view NOT registered; all queries return empty results |
-| New Parquet file appears mid-session | Automatically picked up on next DuckDB query |
-| Parquet file missing optional column (`vex`) | `union_by_name=true` fills NULL; `_safe_query()` returns `[]` for analytics depending on it |
-| DuckDB query raises unexpected exception | Re-raised by `_safe_query()`; caught by analytics function's `except` block; logged as WARNING |
-| Scheduler tick takes > 5 min | `max_instances=1` prevents overlap; `coalesce=True` merges missed ticks |
-| Pipeline step fails (e.g. `generate_recommendation` error) | Caught per-underlying; next underlying still processes |
+|---|---|
+| `data/processed` empty at startup | Warning logged, view not registered; analytics return empty results |
+| New Parquet file written mid-session | Visible on next DuckDB query automatically |
+| New trade-date partition created by BQ pull | `refresh_views()` called immediately so new day is visible same tick |
+| Missing required column | `RuntimeError` on startup (fail-fast); error log on EOD refresh |
+| BQ pull fails | Error logged, tick continues with last cached Parquet data |
+| analytics function raises | `record_error(fn_name)` called; exception caught; empty result returned |
 
 ---
 
-## 8. Configuration Reference (Pipeline)
+## 9. Key Configuration
 
 | Setting | Default | Description |
 |---|---|---|
-| `DATA_ROOT` | `data/parquet` | Root directory for Parquet files |
-| `JOURNAL_DB_PATH` | `data/journal.db` | SQLite journal path |
-| `MARKET_OPEN` | `09:15` | Market open time (IST) |
-| `MARKET_CLOSE` | `15:30` | Market close time (IST) |
-| `EOD_FORCE_CLOSE_TIME` | `15:25` | Time to force-close all ACCEPTED trades |
-| `EOD_SWEEP_TIME` | `15:30` | Time to finalize shadow trades |
+| `DATA_ROOT` | `data` | Root for Parquet files |
+| `DUCK_VIEW_LOOKBACK_DAYS` | `5` | Rolling window days in DuckDB view |
+| `DUCKDB_THREADS` | `4` | DuckDB parallelism |
+| `DUCKDB_MEMORY_LIMIT` | `2GB` | DuckDB memory cap |
+| `SCHEDULER_INTERVAL_SECONDS` | `300` | Tick interval (5 min) |
+| `EOD_FORCE_CLOSE_TIME` | `15:20` | Force-close all ACCEPTED trades |
+| `EOD_SWEEP_TIME` | `15:25` | Finalize shadows + refresh view |
+| `RAW_PARQUET_RETENTION_DAYS` | `3` | Purge old raw Parquets after N days |
+| `MARKET_HOLIDAYS` | *(2026 NSE calendar)* | ISO date strings to skip |

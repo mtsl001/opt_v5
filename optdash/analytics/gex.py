@@ -4,6 +4,7 @@ import duckdb
 from loguru import logger
 from optdash.config import settings
 from optdash.models import GEXRegime
+from optdash.metrics import record_error
 
 
 def get_net_gex(
@@ -63,6 +64,7 @@ def get_net_gex(
             "spot":   row[4],
         }
     except Exception as e:
+        record_error("get_net_gex")
         logger.warning("get_net_gex error: {}", e)
         return {}
 

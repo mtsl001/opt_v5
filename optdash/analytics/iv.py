@@ -4,6 +4,7 @@ import duckdb
 from loguru import logger
 from optdash.config import settings
 from optdash.models import TermStructureShape
+from optdash.metrics import record_error
 
 
 def get_ivr_ivp(
@@ -137,6 +138,7 @@ def get_ivr_ivp(
                             ).get("shape", "FLAT"),
         }
     except Exception as e:
+        record_error("get_ivr_ivp")
         logger.warning("get_ivr_ivp error: {}", e)
         return {}
 
@@ -186,7 +188,10 @@ def get_term_structure(
 
 
 def _classify_shape(near_iv: float | None, far_iv: float | None) -> str:
-    if not near_iv or not far_iv:
+    # Issue-4: explicit None check — `not 0.0` is True in Python, so the old
+    # `not near_iv` guard misclassified genuine zero IV as missing data.
+    # near_iv == 0 guard prevents ZeroDivisionError on far_iv / near_iv.
+    if near_iv is None or far_iv is None or near_iv == 0:
         return TermStructureShape.FLAT.value
     ratio = far_iv / near_iv
     if ratio > 1.05:

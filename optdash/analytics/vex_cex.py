@@ -12,6 +12,7 @@ import duckdb
 from loguru import logger
 from optdash.config import settings
 from optdash.models import VexSignal, CexSignal
+from optdash.metrics import record_error
 
 
 def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
@@ -52,6 +53,7 @@ def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
             "dealer_oclock": dealer_oc, "interpretation": interp,
         }
     except Exception as e:
+        record_error("get_vex_cex_current")
         logger.warning("get_vex_cex_current error: {}", e)
         return {}
 

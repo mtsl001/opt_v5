@@ -80,7 +80,10 @@ def _now_ist() -> datetime:
 
 
 def _today_str() -> str:
-    return date.today().strftime("%Y-%m-%d")
+    # Issue-6: use IST-aware date to stay consistent with _snap_time_str().
+    # date.today() uses the system timezone, which would produce wrong dates
+    # on a UTC server during 00:00–05:30 UTC (05:30–11:00 IST morning session).
+    return _now_ist().date().strftime("%Y-%m-%d")
 
 
 def _snap_time_str() -> str:

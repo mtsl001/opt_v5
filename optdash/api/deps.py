@@ -71,7 +71,8 @@ from fastapi import FastAPI, Request
 from loguru import logger
 
 from optdash.config import settings
-from optdash.ai.journal.schema import init_db
+from pathlib import Path
+from optdash.ai.journal.schema import init_db, open_journal
 from optdash.pipeline.duckdb_gateway import (
     startup  as duck_startup,
     shutdown as duck_shutdown,
@@ -81,20 +82,20 @@ from optdash.pipeline.duckdb_gateway import (
 
 
 def _open_journal_conn(path: str) -> sqlite3.Connection:
-    """Open a SQLite connection with WAL mode and FK enforcement.
+    """Open a SQLite connection with WAL mode, FK enforcement, and busy_timeout.
 
-    Extracted from startup() so both the API connection and the scheduler
-    connection are configured identically without duplicating the PRAGMA block.
+    Issue-1 fix: delegates to schema.py::open_journal() — the canonical
+    connection factory that guarantees WAL + foreign_keys + busy_timeout=5000
+    on every connection.  Previously this function duplicated those PRAGMAs
+    but omitted busy_timeout, causing immediate SQLITE_BUSY errors under
+    concurrent API + scheduler writes instead of retrying for 5 seconds.
+
+    synchronous=NORMAL is added on top: safe with WAL, ~3x faster writes.
     """
-    conn = sqlite3.connect(str(path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    # WAL mode: allows concurrent reads+writes without exclusive locking.
-    # The scheduler writes position_snaps every 5 min while the API handles
-    # accept/reject requests -- both need simultaneous write access.
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = open_journal(Path(path))
     conn.execute("PRAGMA synchronous=NORMAL")  # safe with WAL, ~3x faster writes
-    conn.execute("PRAGMA foreign_keys=ON")      # enforce referential integrity
     return conn
+
 
 
 async def startup(app: FastAPI) -> None:
