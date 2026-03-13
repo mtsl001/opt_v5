@@ -5,6 +5,14 @@ Classifier parameter change (Fix-B):
   _classify_cex(cex_total, underlying) now look up per-underlying
   thresholds from VEX_THRESHOLDS / CEX_CHARM_THRESHOLD / CEX_VANNA_THRESHOLD
   in config, instead of using global scalar constants for all indices.
+
+N-1 scaling fix:
+  vex and cex columns in Parquet are stored in Rs M units (divided by 1e6
+  in processor._compute_gex_vex_cex).  All SQL queries in this file
+  previously divided by 1e6 again, producing values 1,000,000x too small
+  and silently suppressing every VEX/CEX gate signal.
+  The /1e6 divisors have been removed from all four SQL blocks.
+  The _M suffix on output column names is correct and preserved.
 """
 from datetime import date
 
@@ -21,14 +29,14 @@ def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
     try:
         row = conn.execute("""
             SELECT
-                SUM(CASE WHEN option_type='CE' THEN vex ELSE 0 END) / 1e6  AS vex_ce_M,
-                SUM(CASE WHEN option_type='PE' THEN vex ELSE 0 END) / 1e6  AS vex_pe_M,
-                SUM(vex) / 1e6                                              AS vex_total_M,
-                SUM(CASE WHEN option_type='CE' THEN cex ELSE 0 END) / 1e6  AS cex_ce_M,
-                SUM(CASE WHEN option_type='PE' THEN cex ELSE 0 END) / 1e6  AS cex_pe_M,
-                SUM(cex) / 1e6                                              AS cex_total_M,
-                AVG(spot)                                                   AS spot,
-                MIN(dte)                                                    AS dte
+                SUM(CASE WHEN option_type='CE' THEN vex ELSE 0 END)  AS vex_ce_M,
+                SUM(CASE WHEN option_type='PE' THEN vex ELSE 0 END)  AS vex_pe_M,
+                SUM(vex)                                             AS vex_total_M,
+                SUM(CASE WHEN option_type='CE' THEN cex ELSE 0 END)  AS cex_ce_M,
+                SUM(CASE WHEN option_type='PE' THEN cex ELSE 0 END)  AS cex_pe_M,
+                SUM(cex)                                             AS cex_total_M,
+                AVG(spot)                                            AS spot,
+                MIN(dte)                                             AS dte
             FROM options_data
             WHERE trade_date=? AND snap_time=? AND underlying=?
               AND expiry_tier='TIER1'
@@ -76,12 +84,12 @@ def _get_vex_cex_series(conn, trade_date, underlying) -> list[dict]:
     try:
         rows = conn.execute("""
             SELECT snap_time,
-                SUM(vex)/1e6 AS vex_total_M,
-                SUM(CASE WHEN option_type='CE' THEN vex ELSE 0 END)/1e6 AS vex_ce_M,
-                SUM(CASE WHEN option_type='PE' THEN vex ELSE 0 END)/1e6 AS vex_pe_M,
-                SUM(cex)/1e6 AS cex_total_M,
-                SUM(CASE WHEN option_type='CE' THEN cex ELSE 0 END)/1e6 AS cex_ce_M,
-                SUM(CASE WHEN option_type='PE' THEN cex ELSE 0 END)/1e6 AS cex_pe_M,
+                SUM(vex)                                                         AS vex_total_M,
+                SUM(CASE WHEN option_type='CE' THEN vex ELSE 0 END)              AS vex_ce_M,
+                SUM(CASE WHEN option_type='PE' THEN vex ELSE 0 END)              AS vex_pe_M,
+                SUM(cex)                                                         AS cex_total_M,
+                SUM(CASE WHEN option_type='CE' THEN cex ELSE 0 END)              AS cex_ce_M,
+                SUM(CASE WHEN option_type='PE' THEN cex ELSE 0 END)              AS cex_pe_M,
                 AVG(spot) AS spot, MIN(dte) AS dte
             FROM options_data
             WHERE trade_date=? AND underlying=? AND expiry_tier='TIER1'
@@ -115,7 +123,8 @@ def _get_by_strike(conn, trade_date, snap_time, underlying) -> list[dict]:
         rows = conn.execute("""
             SELECT strike_price, option_type,
                    (strike_price - AVG(spot) OVER()) / NULLIF(AVG(spot) OVER(), 0) * 100 AS moneyness_pct,
-                   SUM(vex)/1e6 AS vex_M, SUM(cex)/1e6 AS cex_M,
+                   SUM(vex) AS vex_M,
+                   SUM(cex) AS cex_M,
                    SUM(oi) AS oi, AVG(iv) AS iv, MIN(dte) AS dte
             FROM options_data
             WHERE trade_date=? AND snap_time=? AND underlying=? AND expiry_tier='TIER1'
