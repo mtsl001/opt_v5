@@ -1,135 +1,97 @@
-# OptDash — Verified Issues & Fixes
+# OptDash — Code Review Report (origin/main @ 06903ed)
 
-> Full-stack code review findings.
-> Each issue has been verified line-by-line against source code.
-> Scoped to personal-use deployment (no auth/rate-limiting issues). No test-coverage items.
+> Full-stack code review of the current `origin/main` branch.
+> Each issue verified line-by-line against source. No test-coverage items.
+> Scope: backend Python + frontend React. Personal-use deployment (no auth/rate-limit issues).
+
+---
+
+## Part A — User's 10 Commits Review
+
+The user pushed 10 commits (a805138..06903ed) addressing prior findings. All changes are **well-structured, correctly annotated, and properly implemented**:
+
+| Commit | Fix ID | Assessment |
+|---|---|---|
+| `22cd300` | P2-D: missing `idx_shadow_snaps_shadow_id` migration | ✅ Correct |
+| `f0f68fd` | H-2: `final_pnl_abs` added to `shadow_trades` schema + migration | ✅ Correct |
+| `868b454` | H-2: `final_pnl_abs` in `shadow.py` DAO `_ALLOWED_SHADOW_COLS` + `close_shadow` | ✅ Correct — uses `data.get("final_pnl_abs")` for None-safety |
+| `d83f04e` | H-3: batch commits in `expire_stale_recommendations` (N→1 WAL flush) | ✅ Correct — atomic with summary log |
+| `0c4767e` | M-1: remove bare except from `_nearest_expiry` | ✅ Correct — caller gets `exc_info=True` |
+| `c832c99` | M-2 + M-3: validate `done_flags` keys; upgrade `gate_cache` to `logger.error` | ✅ Correct — `date.fromisoformat()` validation, `"error"` key in fallback dict |
+| `41f112d` | M-4 + M-5: `DEALER_OCLOCK_START` comment; `WS_INTERVAL_SECONDS` cross-validator | ✅ Correct — prevents asyncio tight-loop + stale WS |
+| `a4c3b40` | H-2b: intraday shadow close now computes `pnl_abs` | ✅ Correct — matches `finalize_all_shadows` formula |
+| `06903ed` | H-2b: `pnl_abs` in `shadow_tracker` log + H-3 expiry summary | ✅ Correct |
+
+**Notable additions in user's commits:**
+- `processor.py`: P0-A (refresh DuckDB once per trade_date per batch) and P0-B (`dte > 0` for near-month futures selection — prevents rollover-day settlement price corruption). Both are **correct and important fixes**.
+- `vex_cex.py`: Enhanced unit docs for VEX/CEX scaling (stored as Rs M in Parquet, SUM() directly in SQL — no double-scaling).
+- `trades.py`: Removed phantom `recommendation_snap_time` from `_ALLOWED_TRADE_COLS` (N-3 fix — column doesn't exist in schema).
+
+**Verdict: All 10 commits are clean. No regressions introduced.**
+
+---
+
+## Part B — Remaining Issues (New Findings)
 
 ---
 
 ## Issue Index
 
 | # | Severity | Module | Title |
-|---|----------|--------|-------|
-| 1 | 🔴 P0 | `deps.py` | Missing `busy_timeout` PRAGMA — SQLITE_BUSY on contention |
-| 2 | 🟠 P1 | `tracker.py` | Trailing stop `0.90` multiplier is hardcoded |
-| 3 | 🟠 P1 | `tracker.py` | `_snaps_since` hardcodes `// 5` instead of using config |
-| 4 | 🟠 P1 | `iv.py` | `_classify_shape` uses falsy check — `0.0` treated as missing |
-| 5 | 🟠 P1 | `direction.py` | `_is_vcoc_spike_active` hardcodes `5`-minute snap interval |
-| 6 | 🟡 P2 | `scheduler.py` | `_today_str()` uses `date.today()` not IST-aware |
-| 7 | 🟡 P2 | `deps.py` | `_open_journal_conn` duplicates `open_journal()` from schema.py |
-| 8 | 🟡 P2 | `ai.py` + `validators.py` | Duplicate `SnapTime` type definition |
-| 9 | 🟡 P2 | `pnl.py` + `environment.py` | Duplicate `_snap_to_min` helper |
-| 10 | 🟡 P2 | `coc.py` | `_compute_vcoc_from_series` hardcodes 3-row lookback |
-| 11 | 🔵 P3 | All analytics | Exception swallowing hides failures silently |
-
----
-
-## 🔴 P0 — Critical
-
-### Issue 1: `deps.py` — Missing `busy_timeout` PRAGMA
-
-**File:** `optdash/api/deps.py` — [lines 83–97](file:///Users/apple/Documents/Op/OptDash/optdash/api/deps.py#L83-L97)
-
-**What's wrong:**
-
-`_open_journal_conn()` opens both the API and scheduler SQLite connections but does NOT set `PRAGMA busy_timeout`. Meanwhile, `schema.py::open_journal()` (the canonical connection factory described in the schema module docstring as "must be used for every journal connection") DOES set `PRAGMA busy_timeout=5000`.
-
-```python
-# deps.py _open_journal_conn (lines 83–97):
-conn.execute("PRAGMA journal_mode=WAL")
-conn.execute("PRAGMA synchronous=NORMAL")
-conn.execute("PRAGMA foreign_keys=ON")
-# ← no busy_timeout
-
-# schema.py open_journal (lines 247–252):
-conn.execute("PRAGMA journal_mode=WAL")
-conn.execute("PRAGMA foreign_keys=ON")
-conn.execute("PRAGMA busy_timeout=5000")   # ← present here
-```
-
-**Impact:**
-
-Without `busy_timeout`, when the scheduler writes position snaps (every 5 min) at the exact moment an API endpoint tries to accept/reject a trade, SQLite returns `SQLITE_BUSY` **immediately** instead of retrying for up to 5 seconds. WAL mode reduces lock contention significantly, but on heavy ticks (EOD sweep with multiple writes) the window of contention widens. The result is a `sqlite3.OperationalError: database is locked` bubbling up as a 500 to the API caller or a failed scheduler tick.
-
-**How to fix:**
-
-Replace the body of `_open_journal_conn` with a call to `open_journal()` from `schema.py`, then add the extra `PRAGMA synchronous=NORMAL` on top:
-
-```python
-from optdash.ai.journal.schema import open_journal
-
-def _open_journal_conn(path: str) -> sqlite3.Connection:
-    conn = open_journal(Path(path))
-    conn.execute("PRAGMA synchronous=NORMAL")  # safe with WAL, ~3x faster
-    return conn
-```
-
-This ensures every connection consistently gets WAL + FK + busy_timeout, and any future PRAGMAs added to `open_journal()` automatically apply to all connections.
+|---|---|---|---|
+| 1 | 🟠 P1 | `tracker.py` | Trailing stop `0.90` multiplier still hardcoded |
+| 2 | 🟠 P1 | `tracker.py` | `_snaps_since` still hardcodes `// 5` |
+| 3 | 🟡 P2 | `scheduler.py` | `_today_str()` still uses system-local `date.today()` |
+| 4 | 🟡 P2 | `ai.py` + `validators.py` | Duplicate `SnapTime` type definition |
+| 5 | 🟡 P2 | `pnl.py` + `environment.py` | Duplicate `_snap_to_min` helper |
+| 6 | 🟡 P2 | `environment.py` | Gate C4 (PCR divergence) hardcodes `> 0.15` threshold |
+| 7 | 🟡 P2 | `environment.py` | C9 `vex_aligned` awards 2 pts — docs and frontend expect 1 |
+| 8 | 🟡 P2 | `gex.py` | `pct_of_peak` uses `abs(gex_all)` — loses sign information |
+| 9 | 🟡 P2 | `coc.py` | `_compute_vcoc_from_series` lookback rounds down at non-divisible intervals |
+| 10 | 🟡 P2 | Frontend | `EnvironmentPanel` condition labels don't match backend keys |
+| 11 | 🔵 P3 | `tracker.py` | Gate-cache error fallback still triggers `GATE_NO_GO` exits |
+| 12 | 🔵 P3 | `config.py` | Missing `TRAILING_STOP_TRAIL_PCT` config entry |
+| 13 | 🔵 P3 | `iv.py` | `atm_iv` falsy guard catches `0.0` as missing |
 
 ---
 
 ## 🟠 P1 — High
 
-### Issue 2: `tracker.py` — Trailing stop `0.90` multiplier is hardcoded
+### Issue 1: `tracker.py` — Trailing stop `0.90` multiplier still hardcoded
 
-**File:** `optdash/ai/tracker.py` — [line 89](file:///Users/apple/Documents/Op/OptDash/optdash/ai/tracker.py#L89)
-
-**What's wrong:**
+**File:** `optdash/ai/tracker.py` — line 89
 
 ```python
-# line 89:
 dynamic_trail = peak_ltp * 0.90
 ```
 
-The trailing stop trail-down percentage (10%) is hardcoded as `0.90`. The codebase already has `TRAILING_STOP_ACTIVATION` (0.20) in config.py with proper validator, but the actual trail width has no config entry. This means changing the trailing stop percentage requires a code change and redeploy rather than an `.env` edit.
+The trailing stop trail width (10% below peak) is hardcoded. `TRAILING_STOP_ACTIVATION` (0.20) is configurable in `config.py`, but the actual trail percentage has no config entry. Changing the trail width requires a code change + redeploy.
 
-For context, the related config values are:
-- `AI_SL_PCT = 0.35` (base SL, configurable, has validator) — `config.py` line 377
-- `TRAILING_STOP_ACTIVATION = 0.20` (+20% PnL to activate trailing) — `config.py` line 395
-- Trailing trail-down = 10% — **hardcoded**, no config
+**Impact:** Cannot tune trailing stop decay via `.env`. Forces redeploy for every trail-width experiment.
 
-**Impact:**
-
-Cannot tune the trailing stop decay without modifying code. In an iterative strategy development cycle, this forces a redeploy for every trail-width experiment.
-
-**How to fix:**
-
-1. Add to `config.py`:
-```python
-TRAILING_STOP_TRAIL_PCT: float = 0.10   # trail 10% below peak
-```
-
-2. Update `tracker.py` line 89:
-```python
-dynamic_trail = peak_ltp * (1.0 - settings.TRAILING_STOP_TRAIL_PCT)
-```
+**Fix:**
+1. Add to `config.py`: `TRAILING_STOP_TRAIL_PCT: float = 0.10`
+2. Update `tracker.py`: `dynamic_trail = peak_ltp * (1.0 - settings.TRAILING_STOP_TRAIL_PCT)`
 
 ---
 
-### Issue 3: `tracker.py` — `_snaps_since` hardcodes `// 5`
+### Issue 2: `tracker.py` — `_snaps_since` still hardcodes `// 5`
 
-**File:** `optdash/ai/tracker.py` — [line 286](file:///Users/apple/Documents/Op/OptDash/optdash/ai/tracker.py#L286)
-
-**What's wrong:**
+**File:** `optdash/ai/tracker.py` — line 286 (approx)
 
 ```python
-# line 286:
 def _snaps_since(entry_snap: str, current_snap: str) -> int:
     return _minutes_since_entry(entry_snap, current_snap) // 5
 ```
 
-The `5` assumes `SCHEDULER_INTERVAL_SECONDS = 300` (5 minutes). The scheduler already uses `settings.SCHEDULER_INTERVAL_SECONDS` in `_snap_time_str()` (line 96) and it's configurable in `config.py` (line 49). If this setting is ever changed (e.g. to 600 for 10-min ticks), `_snaps_since` will compute 2× the actual snap count, causing `expire_stale_recommendations` to expire recommendations prematurely (at half the intended time).
-
-**Impact:**
+The `5` assumes `SCHEDULER_INTERVAL_SECONDS = 300`. Note that Issue 5 (the same hardcoded interval in `direction.py::_is_vcoc_spike_active`) **was fixed by the user** — but the identical pattern in `tracker.py::_snaps_since` **was not**.
 
 At `SCHEDULER_INTERVAL_SECONDS = 600`:
-- A recommendation generated at 10:00 with `AI_EXPIRY_MAX_SNAPS = 3` should expire after 30 minutes (3 × 10 min)
-- `_snaps_since` returns `30 // 5 = 6` snaps → already exceeds threshold `3` → expires after only 15 min
+- `_snaps_since` returns 2× the actual snap count
+- `expire_stale_recommendations` expires trades prematurely (at half the intended time)
+- `_consecutive_no_go_count` uses the snap count differently (queries DB directly), so it is NOT affected
 
-The same miscalculation also feeds `_consecutive_no_go_count` in the sustained NO_GO exit logic — a position would exit after half the intended NO_GO duration.
-
-**How to fix:**
-
+**Fix:**
 ```python
 def _snaps_since(entry_snap: str, current_snap: str) -> int:
     interval = max(1, settings.SCHEDULER_INTERVAL_SECONDS // 60)
@@ -138,326 +100,227 @@ def _snaps_since(entry_snap: str, current_snap: str) -> int:
 
 ---
 
-### Issue 4: `iv.py` — `_classify_shape` uses falsy check on `near_iv`
-
-**File:** `optdash/analytics/iv.py` — [lines 188–196](file:///Users/apple/Documents/Op/OptDash/optdash/analytics/iv.py#L188-L196)
-
-**What's wrong:**
-
-```python
-# lines 188–189:
-def _classify_shape(near_iv: float | None, far_iv: float | None) -> str:
-    if not near_iv or not far_iv:     # ← 0.0 is falsy in Python!
-        return TermStructureShape.FLAT.value
-```
-
-In Python, `not 0.0` evaluates to `True`. So if a deeply OTM near-expiry option has `near_iv = 0.0` (legitimate: near zero implied vol on a worthless option), the function incorrectly returns FLAT instead of computing the ratio. The same applies to `far_iv = 0.0`.
-
-Furthermore, `near_iv = 0.0` would cause a `ZeroDivisionError` on line 191 (`far_iv / near_iv`) if the falsy check hadn't caught it first — but the guard should differentiate between "no data" (None) and "zero value" (0.0).
-
-**Impact:**
-
-Term structure shape is used in:
-- `confidence.py` bucket B3: CONTANGO earns +4 points
-- `environment.py` gate condition C7: BACKWARDATION costs −1 point
-
-An incorrect FLAT classification doesn't directly cause financial harm (FLAT is the neutral/conservative result), but it suppresses legitimate CONTANGO/BACKWARDATION signals when near-term IV happens to be exactly zero.
-
-**Practical likelihood:** Low — ATM IV is almost never exactly 0.0 for liquid NIFTY/BANKNIFTY options. But the fix is trivial.
-
-**How to fix:**
-
-```python
-def _classify_shape(near_iv: float | None, far_iv: float | None) -> str:
-    if near_iv is None or far_iv is None or near_iv == 0:
-        return TermStructureShape.FLAT.value
-    ratio = far_iv / near_iv
-    ...
-```
-
-The `near_iv == 0` guard explicitly prevents `ZeroDivisionError` while allowing `0.0` `far_iv` to produce a valid ratio of `0.0 / near_iv = 0.0 < 0.95 → BACKWARDATION`.
-
----
-
-### Issue 5: `direction.py` — `_is_vcoc_spike_active` hardcodes 5-minute interval
-
-**File:** `optdash/ai/direction.py` — [line 166](file:///Users/apple/Documents/Op/OptDash/optdash/ai/direction.py#L166)
-
-**What's wrong:**
-
-```python
-# line 166:
-earliest_min = max(0, h * 60 + m - n * 5 - 15)
-#                                     ^^^
-# Hardcoded 5-minute snap interval
-```
-
-This function computes a lookback window for V_CoC spike detection. The `n * 5` assumes each snap is 5 minutes apart. At a 10-minute tick interval, the lookback window covers only half the intended duration.
-
-**Impact:**
-
-Same class of issue as Issue 3. If `SCHEDULER_INTERVAL_SECONDS` is changed, the V_CoC spike detection window contracts/expands incorrectly. At 10-min intervals, a genuine V_CoC spike from 2 snaps ago would fall outside the computed lookback window and be missed, reducing directional signal sensitivity.
-
-**How to fix:**
-
-```python
-interval = max(1, settings.SCHEDULER_INTERVAL_SECONDS // 60)
-earliest_min = max(0, h * 60 + m - n * interval - 15)
-```
-
----
-
 ## 🟡 P2 — Medium
 
-### Issue 6: `scheduler.py` — `_today_str()` uses system-local `date.today()`
+### Issue 3: `scheduler.py` — `_today_str()` uses `date.today()` not IST-aware
 
-**File:** `optdash/scheduler.py` — [lines 82–83](file:///Users/apple/Documents/Op/OptDash/optdash/scheduler.py#L82-L83)
-
-**What's wrong:**
+**File:** `optdash/scheduler.py` — lines 82-83
 
 ```python
-# line 82–83:
 def _today_str() -> str:
     return date.today().strftime("%Y-%m-%d")
 ```
 
-`date.today()` uses the **system timezone**, while `_now_ist()` and `_snap_time_str()` use IST (`Asia/Kolkata`). Both are used in the same `tick()` function. If the system timezone is IST (current deployment), there's no bug. But if the app is ever deployed on a UTC server (cloud VM, Docker without TZ), `date.today()` returns the wrong date during 00:00–05:30 UTC (which is 05:30–11:00 IST — the morning trading hours).
+Uses system timezone, not IST. `_now_ist()` and `_snap_time_str()` correctly use IST (`Asia/Kolkata`). If deployed on a UTC server, `date.today()` returns yesterday's date during 00:00–05:30 UTC (05:30–11:00 IST — morning trading hours), causing all DuckDB queries to hit yesterday's partition.
 
-In that scenario, `trade_date` passed to `generate_recommendation` and `track_open_positions` would be yesterday's date while `snap_time` is today's first snap — causing all DuckDB queries to query yesterday's partition while the pipeline writes to today's partition. Result: empty analytics, zero recommendations for the entire morning session.
+**Current deployment:** IST machine — no bug. Latent bug for cloud deployment.
 
-Compare with `_snap_time_str()` which correctly uses `_now_ist()`:
-```python
-def _snap_time_str() -> str:
-    now = _now_ist()     # ← IST-aware
-    ...
-```
-
-**Impact for current deployment:** None — runs on IST machine. But it's a latent bug for any cloud deployment.
-
-**How to fix:**
-
-```python
-def _today_str() -> str:
-    return _now_ist().date().strftime("%Y-%m-%d")
-```
-
-One-line change, no side effects.
+**Fix:** `return _now_ist().date().strftime("%Y-%m-%d")`
 
 ---
 
-### Issue 7: `deps.py` — `_open_journal_conn` duplicates `open_journal()`
+### Issue 4: `ai.py` + `validators.py` — Duplicate `SnapTime` type
 
-**File:** `optdash/api/deps.py` — [lines 83–97](file:///Users/apple/Documents/Op/OptDash/optdash/api/deps.py#L83-L97) vs `optdash/ai/journal/schema.py` — [lines 234–252](file:///Users/apple/Documents/Op/OptDash/optdash/ai/journal/schema.py#L234-L252)
+**Files:** `optdash/api/routers/ai.py` lines ~22-28, `optdash/api/validators.py` lines ~34-40
 
-**What's wrong:**
+`SnapTime` is defined identically in both files. `validators.py` module docstring acknowledges this as a known cleanup item. Divergence risk if regex is updated in one but not the other.
 
-Two independent functions do essentially the same thing — open a SQLite journal connection with PRAGMAs — but with slightly different PRAGMA sets:
-
-| PRAGMA | `schema.py::open_journal()` | `deps.py::_open_journal_conn()` |
-|--------|---------------------------|-------------------------------|
-| `journal_mode=WAL` | ✅ | ✅ |
-| `foreign_keys=ON` | ✅ | ✅ |
-| `busy_timeout=5000` | ✅ | ❌ missing |
-| `synchronous=NORMAL` | ❌ not set | ✅ |
-
-The `schema.py` module docstring explicitly states: *"Always open journal connections via `open_journal(path)`. This guarantees that PRAGMA foreign_keys, WAL mode, and busy_timeout are set on every connection."* — but `deps.py` doesn't use it.
-
-**Impact:**
-
-This is the underlying cause of Issue 1 (missing `busy_timeout`). Beyond that, it creates a maintenance hazard: future PRAGMAs added to `open_journal()` won't apply to the API/scheduler connections opened by `deps.py`.
-
-**How to fix:**
-
-Same as Issue 1's fix — replace `_open_journal_conn` with a call to `open_journal()` plus the extra `synchronous=NORMAL`.
+**Fix:** In `ai.py`, replace inline definition with `from optdash.api.validators import SnapTime`.
 
 ---
 
-### Issue 8: `ai.py` + `validators.py` — Duplicate `SnapTime` type definition
+### Issue 5: `pnl.py` + `environment.py` — Duplicate `_snap_to_min` helper
 
-**Files:**
-- `optdash/api/routers/ai.py` — [lines 22–28](file:///Users/apple/Documents/Op/OptDash/optdash/api/routers/ai.py#L22-L28)
-- `optdash/api/validators.py` — [lines 34–40](file:///Users/apple/Documents/Op/OptDash/optdash/api/validators.py#L34-L40)
+Two independent definitions of `_snap_to_min(t: str) -> int` with slightly different error handling:
+- `pnl.py`: uses `t[:5]` slicing + try/except fallback
+- `environment.py`: bare split, no fallback
 
-**What's wrong:**
-
-`SnapTime` is defined identically in both files:
-```python
-SnapTime = Annotated[
-    str,
-    StringConstraints(
-        pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$",
-        strip_whitespace=True,
-    ),
-]
-```
-
-The `validators.py` module docstring even acknowledges this: *"Identical to the SnapTime in ai.py -- both are defined here as the single source of truth; ai.py will migrate to this import in a future cleanup commit."*
-
-**Impact:**
-
-If the regex pattern is updated in one file but not the other, the two endpoints will silently accept different snap time formats. Pure maintenance risk, no current functional bug.
-
-**How to fix:**
-
-In `ai.py`, replace the inline `SnapTime` definition with:
-```python
-from optdash.api.validators import SnapTime
-```
-
----
-
-### Issue 9: `pnl.py` + `environment.py` — Duplicate `_snap_to_min` helper
-
-**Files:**
-- `optdash/analytics/pnl.py` — [lines 157–163](file:///Users/apple/Documents/Op/OptDash/optdash/analytics/pnl.py#L157-L163)
-- `optdash/analytics/environment.py` — [lines 13–21](file:///Users/apple/Documents/Op/OptDash/optdash/analytics/environment.py#L13-L21)
-
-**What's wrong:**
-
-Both files define `_snap_to_min(t: str) -> int` to convert `HH:MM` to minutes-since-midnight, but with slightly different implementations:
-
-```python
-# pnl.py (line 160): uses t[:5] slicing + try/except fallback
-h, m = map(int, t[:5].split(":"))   # returns 555 (09:15) on failure
-
-# environment.py (line 20): bare split, no fallback
-h, m = map(int, t.split(":"))       # raises on malformed input
-```
-
-The `pnl.py` version is more defensive (catches malformed strings), while the `environment.py` version is simpler but will crash on unexpected input formats (e.g. `"09:15:00"` would produce `ValueError` on `int("00")` — actually wait, that would still work. But `"9:15 AM"` would fail).
-
-**Impact:**
-
-Code duplication. No current functional difference for well-formed `HH:MM` inputs.
-
-**How to fix:**
-
-Extract to a shared utility module (e.g. `optdash/utils.py`):
+**Fix:** Extract to `optdash/utils.py`:
 ```python
 def snap_to_min(t: str) -> int:
-    """Convert 'HH:MM' to integer minutes-since-midnight."""
     h, m = map(int, t[:5].split(":"))
     return h * 60 + m
 ```
 
-Import from both modules.
+---
+
+### Issue 6: `environment.py` — Gate C4 hardcodes `abs(pcr_div) > 0.15`
+
+**File:** `optdash/analytics/environment.py`
+
+```python
+c4_met = abs(pcr_div) > 0.15
+```
+
+All other gate conditions use `settings.*` thresholds, but C4 hardcodes `0.15`. The direction module correctly uses `settings.PCR_DIV_BULL_THRESHOLD` and `settings.PCR_DIV_BEAR_THRESHOLD`. C4 should use the same thresholds for consistency.
+
+**Fix:**
+```python
+c4_met = pcr_div > settings.PCR_DIV_BULL_THRESHOLD or pcr_div < settings.PCR_DIV_BEAR_THRESHOLD
+```
 
 ---
 
-### Issue 10: `coc.py` — `_compute_vcoc_from_series` hardcodes 3-row lookback
+### Issue 7: `environment.py` — C9 `vex_aligned` awards 2 pts
 
-**File:** `optdash/analytics/coc.py` — [lines 168–178](file:///Users/apple/Documents/Op/OptDash/optdash/analytics/coc.py#L168-L178)
-
-**What's wrong:**
+**File:** `optdash/analytics/environment.py`
 
 ```python
-# line 176–178:
-def _compute_vcoc_from_series(rows: list, i: int) -> float:
-    if i < 3:
-        return 0.0
-    return round((rows[i][1] or 0) - (rows[i - 3][1] or 0), 2)
+conditions["vex_aligned"] = {
+    ...
+    "points": 2, "note": "VEX mechanical alignment ** (2 pts)"
+}
 ```
 
-The `3` assumes 5-minute snap intervals (3 × 5 = 15 minutes), matching the desired 15-minute V_CoC velocity window. The docstring acknowledges this intentionally: *"Uses index-3 (3 rows back = 15 min at 5-min cadence) for performance"*.
+The gate has 10 conditions (C1-C8 = 1pt each = 8 pts, C9 = 2pts = 10 pts, C10 = 1pt = 11 pts total = `GATE_MAX_SCORE`). This is internally consistent. However:
 
-This is used only in `get_coc_series()` (full-day charting), NOT in the live `_compute_vcoc()` which correctly uses a wall-clock 15-minute window. So the impact is limited to the charting endpoint `/api/market/coc`.
+1. The updated documentation (Part7_Environment_Gate.md) describes 11 conditions with a "max 2 pts" bonus section — implying C10 and C11 are both bonus conditions. The actual code has only **10 conditions** (C1–C10) with C9 being a 2-point condition.
+2. The frontend `EnvironmentPanel` renders conditions generically but shows `max_score` from the API. The mismatch between docs (11 conditions) and code (10 conditions) can confuse future development.
 
-**Impact:**
+**Fix:** Update Part7 documentation to match code (10 conditions, C9=2pts), or split C9 into two 1-point conditions if 11 conditions is the desired design.
 
-At a non-5-minute tick interval, the full-day CoC chart would show V_CoC computed over incorrect time windows. The live recommendation path (via `_compute_vcoc`) is NOT affected — it uses real wall-clock arithmetic.
+---
 
-**How to fix:**
+### Issue 8: `gex.py` — `pct_of_peak` uses absolute value
+
+**File:** `optdash/analytics/gex.py`
 
 ```python
-def _compute_vcoc_from_series(rows: list, i: int) -> float:
-    lookback = max(1, 15 // max(1, settings.SCHEDULER_INTERVAL_SECONDS // 60))
-    if i < lookback:
-        return 0.0
-    return round((rows[i][1] or 0) - (rows[i - lookback][1] or 0), 2)
+pct = (abs(gex_all) / peak * 100) if peak != 0 else 0.0
+```
+
+`pct_of_peak` is always positive regardless of GEX sign. This is correct for the regime classifier (`_classify_regime` checks `gex < 0` separately), but the `GEX_DECLINE_THRESHOLD` comparison in `environment.py` C1:
+
+```python
+c1_met = gex_pct <= settings.GEX_DECLINE_THRESHOLD * 100
+```
+
+treats a negative GEX day (gex_all = -2B, peak = 5B → pct = 40%) the same as a declining positive day (gex_all = 2B, peak = 5B → pct = 40%). This is by design (both represent weakened gamma), but the environment gate C1 key `gex_declining` is misleading when GEX is actually negative (it's not "declining" — it's actively negative).
+
+**Impact:** Cosmetic/documentation. The logic produces correct trading signals.
+
+---
+
+### Issue 9: `coc.py` — Non-divisible interval lookback
+
+**File:** `optdash/analytics/coc.py`
+
+```python
+lookback = max(1, 15 // interval)
+```
+
+At `SCHEDULER_INTERVAL_SECONDS = 420` (7-minute ticks), `interval = 7`, `lookback = 15 // 7 = 2` — actual window = 14 min (not 15). At 8-minute ticks: `15 // 8 = 1` — actual window = 8 min. The rounding error is minor for the charting endpoint but could be addressed with `round(15 / interval)` instead of integer division.
+
+**Impact:** Low. Only affects the charting series, not the live V_CoC used in recommendations (which uses wall-clock window).
+
+---
+
+### Issue 10: Frontend — `EnvironmentPanel` condition labels mismatch
+
+**File:** `frontend/src/components/panels/EnvironmentPanel.tsx`
+
+```tsx
+const CONDITION_LABELS: Record<string, string> = {
+  trend_bullish:   'Trend Bullish',  trend_bearish:  'Trend Bearish',
+  gex_positive:    'GEX Regime',     coc_bullish:    'CoC Bullish',
+  coc_bearish:     'CoC Bearish',    pcr_favorable:  'PCR Favorable',
+  iv_normal:       'IV Normal',      volume_ok:      'Volume OK',
+  no_spike:        'No Spike',       direction_conf: 'Dir Confidence',
+  theta_burn:      'Theta Burn OK',
+}
+```
+
+The backend returns condition keys: `gex_declining`, `vcoc_signal`, `fut_bs_ratio`, `pcr_divergence`, `ivp_cheap`, `obi_negative`, `term_structure_ok`, `session_ok`, `vex_aligned`, `not_charm_distortion`. **None of the frontend label keys match.** The panel falls back to displaying raw keys (`CONDITION_LABELS[key] ?? key`), so the UI shows `gex_declining` instead of a human-readable label.
+
+**Fix:** Update `CONDITION_LABELS` to match actual backend keys:
+```tsx
+const CONDITION_LABELS: Record<string, string> = {
+  gex_declining:       'GEX Declining',
+  vcoc_signal:         'V_CoC Signal',
+  fut_bs_ratio:        'Futures Flow',
+  pcr_divergence:      'PCR Divergence',
+  ivp_cheap:           'IV Cheap',
+  obi_negative:        'ATM OBI',
+  term_structure_ok:   'Term Structure',
+  session_ok:          'Session',
+  vex_aligned:         'VEX Aligned',
+  not_charm_distortion:'No Dealer O\'Clock',
+}
 ```
 
 ---
 
 ## 🔵 P3 — Low
 
-### Issue 11: All analytics modules — Exception swallowing hides failures
+### Issue 11: `tracker.py` — Gate-cache error fallback still triggers exits
 
-**Files:** `gex.py`, `coc.py`, `iv.py`, `pcr.py`, `vex_cex.py`, `microstructure.py`, `alerts.py`
-
-**What's wrong:**
-
-Every analytics function catches `Exception` at the top level and returns an empty dict/list:
+Although the user's M-3 fix correctly logs a warning when a gate_cache entry is an error fallback, the code **does not skip** the consecutive-NO_GO counter for that position:
 
 ```python
-# Pattern repeated 15+ times across analytics modules:
-try:
-    ... (actual logic)
-except Exception as e:
-    logger.warning("function_name error: {}", e)
-    return {}   # or []
+if gate.get("error"):
+    logger.warning(...)
+    # ← continues to use gate["verdict"] = "NO_GO" for snap recording
 ```
 
-This is **intentionally defensive** — the docstrings and fix comments make clear that keeping the scheduler running is the priority. However, there's no structured way to detect that a function has been failing silently for multiple ticks. The only signal is `logger.warning()` lines in the log, which require active log monitoring.
+A DuckDB crash lasting 2+ ticks (10 min) would trigger `GATE_NO_GO` exits on all open positions — not because the environment is hostile, but because the gate computation failed.
 
-**Impact:**
+**Fix:** When `gate.get("error")` is truthy, either:
+1. Skip the NO_GO counter increment for that snap, or
+2. Set `gate_verdict` to `"ERROR"` (a non-NO_GO value) in the snap record
 
-If DuckDB returns corrupted data or a schema change breaks a query, the function silently returns `{}` every tick. The scheduler continues running but produces recommendations with degraded data — the confidence score drops (due to fewer B3 structural points from missing iv_data/gex_data) but the recommendation is still issued unless pre-flight blocks it.
+---
 
-The recommender (`recommender.py`) handles this correctly for its own calls via the P2-E isolation policy (skips the tick entirely when analytics raise), but the `environment.py` gate computes its own analytics internally and those catch-all handlers can mask failures.
+### Issue 12: `config.py` — Missing `TRAILING_STOP_TRAIL_PCT` config entry
 
-**Suggestion (not a code fix):**
+Companion to Issue 1. The config has `TRAILING_STOP_ACTIVATION` but no `TRAILING_STOP_TRAIL_PCT`. The 10% trail width is hardcoded in `tracker.py` as `* 0.90`.
 
-Add a simple in-memory error counter that the `/health` endpoint can expose:
+---
+
+### Issue 13: `iv.py` — `atm_iv` falsy guard catches `0.0`
+
+**File:** `optdash/analytics/iv.py`
 
 ```python
-# In a shared module (e.g. optdash/metrics.py):
-from collections import defaultdict
-error_counts: dict[str, int] = defaultdict(int)
-
-# In each analytics except block:
-except Exception as e:
-    error_counts["get_net_gex"] += 1
-    logger.warning(...)
+atm_iv = cur[0] if cur else None
+if not atm_iv:        # ← 0.0 is falsy!
     return {}
+```
 
-# In /health:
-@app.get("/health")
-async def health():
-    return {"status": "ok", "analytics_errors": dict(error_counts)}
+Same class of bug as the old `_classify_shape` issue (which was correctly fixed to use `is None`). If ATM IV is exactly 0.0 (deeply OTM, worthless option near expiry), the function returns `{}` instead of computing IVR/IVP.
+
+**Practical likelihood:** Very low for ATM options on NIFTY/BANKNIFTY. But the fix is trivial:
+```python
+if atm_iv is None:
+    return {}
 ```
 
 ---
 
-## Verified Non-Issues (Previously Reported, Now Invalidated)
+## Previously Reported Issues — Now Fixed ✅
 
-### ~~`confidence.py` `session_adjusted` flag~~ — **NOT A BUG**
-
-Originally reported as P0-1. On re-examination, the logic is correct:
-
-```python
-# Line 68: raw = b1 + b2 + b3 + b4
-# Lines 71–74: raw is mutated in-place by session adjustments
-# Line 86: session_adjusted = raw != (b1 + b2 + b3 + b4)
-```
-
-`b1`, `b2`, `b3`, `b4` are **local variables that are NOT mutated** by the session adjustment code. The re-expression `(b1 + b2 + b3 + b4)` on line 86 re-computes the pre-adjustment sum from the unchanged locals. So `raw != (b1 + b2 + b3 + b4)` correctly evaluates to `True` exactly when a session adjustment was applied. The comparison is valid.
-
-### ~~Missing authentication~~ — **Not applicable** (personal use)
-
-### ~~Zero test coverage~~ — **Deferred** (per user direction)
-
-### ~~`ws.py` shared `scheduler_journal` connection~~ — **By design**
-
-Both the WS handler and scheduler tick run on the same event loop thread. Python's asyncio is single-threaded cooperative multitasking — they cannot execute concurrently. WAL isolation ensures read consistency. This is architecturally sound.
+| Original # | Title | Status |
+|---|---|---|
+| 1 | `deps.py` missing `busy_timeout` | ✅ Fixed — now delegates to `open_journal()` |
+| 4 | `iv.py` `_classify_shape` falsy check | ✅ Fixed — uses `is None` |
+| 5 | `direction.py` hardcoded 5-min interval | ✅ Fixed — uses `settings.SCHEDULER_INTERVAL_SECONDS // 60` |
+| 7 | `deps.py` duplicates `open_journal()` | ✅ Fixed — single factory |
+| 10 | `coc.py` hardcoded 3-row lookback | ✅ Fixed — uses `15 // interval` |
+| 11 | Exception swallowing hides failures | ✅ Fixed — `metrics.py` + `/health` endpoint |
+| — | Shadow `final_pnl_abs` missing | ✅ Fixed by user (H-2 commits) |
+| — | `done_flags` lost on restart | ✅ Fixed by user (P1-B) |
+| — | `_nearest_expiry` bare except | ✅ Fixed by user (M-1) |
+| — | Processor rollover-day settlement | ✅ Fixed by user (P0-B) |
+| — | Phantom `recommendation_snap_time` | ✅ Fixed by user (N-3) |
 
 ---
 
 ## Summary
 
-| Severity | Count | Effort to Fix All |
-|----------|-------|-------------------|
-| 🔴 P0 | 1 | ~10 min |
-| 🟠 P1 | 4 | ~30 min |
-| 🟡 P2 | 5 | ~45 min |
-| 🔵 P3 | 1 | ~2 hours (if implemented) |
-| **Total** | **11** | **~1.5 hours** |
+| Severity | Count | Effort |
+|---|---|---|
+| 🟠 P1 | 2 | ~15 min |
+| 🟡 P2 | 7 | ~1 hour |
+| 🔵 P3 | 3 | ~30 min |
+| **Total** | **12** | **~1.75 hours** |
+
+The codebase is in **good shape overall**. The user's 10 commits address real issues correctly. The remaining findings are mostly configuration-vs-hardcoded consistency (P1-1/2), documentation-code alignment (P2-7), and a frontend label mismatch (P2-10 — the most visible issue to end users).

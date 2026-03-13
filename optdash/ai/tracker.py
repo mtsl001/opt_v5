@@ -125,6 +125,14 @@ def track_open_positions(
                     "verdict alone.",
                     underlying, gate["error"], trade["id"],
                 )
+                # Issue-11: override the artificial NO_GO verdict so the
+                # consecutive-NO_GO counter does NOT advance on infrastructure
+                # failures.  Without this, a DuckDB crash lasting 2+ ticks
+                # (10 min at default interval) would trigger GATE_NO_GO exits
+                # on all open positions — not because the market environment
+                # is hostile, but because the gate computation failed.
+                # The snap record stores "GATE_ERROR" for auditability.
+                gate = {**gate, "verdict": "GATE_ERROR"}
         else:
             gate = get_environment_score(
                 conn, trade_date, snap_time, underlying, direction=opt_type

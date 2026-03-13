@@ -172,9 +172,16 @@ def _compute_vcoc_from_series(rows: list, i: int) -> float:
 
     Issue-10: lookback derived from SCHEDULER_INTERVAL_SECONDS so the 15-min
     V_CoC window remains correct at non-5-min tick intervals.
+
+    Issue-9: use round() instead of integer division for the lookback count.
+    At non-divisible intervals (e.g. 7-min ticks) floor division truncates:
+      15 // 7 = 2 rows → 14-min window (undershoot).
+    round() picks the nearest row count:
+      round(15 / 7) = 2 at 7-min (14 min — same), but
+      round(15 / 8) = 2 at 8-min (16 min) vs floor 15//8 = 1 (8 min).
     """
     interval = max(1, settings.SCHEDULER_INTERVAL_SECONDS // 60)
-    lookback = max(1, 15 // interval)
+    lookback = max(1, round(15 / interval))
     if i < lookback:
         return 0.0
     return round((rows[i][1] or 0) - (rows[i - lookback][1] or 0), 2)

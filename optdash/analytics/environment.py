@@ -93,7 +93,10 @@ def get_environment_score(
         }
 
         # C4: PCR divergence (1 pt)
-        c4_met = abs(pcr_div) > 0.15
+        # Issue-6: use config thresholds (same as direction.py Signal 5) instead
+        # of the hardcoded 0.15.  This ensures tuning PCR_DIV_*_THRESHOLD in
+        # .env affects both the gate verdict and the directional bias consistently.
+        c4_met = pcr_div > settings.PCR_DIV_BULL_THRESHOLD or pcr_div < settings.PCR_DIV_BEAR_THRESHOLD
         conditions["pcr_divergence"] = {
             "met": c4_met, "value": round(pcr_div, 4),
             "points": 1, "note": f"Divergence = {pcr_div:+.4f}"

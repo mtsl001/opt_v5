@@ -37,7 +37,10 @@ def get_ivr_ivp(
             trade_date, snap_time, underlying,
         ]).fetchone()
         atm_iv = cur[0] if cur else None
-        if not atm_iv:
+        # Issue-13: explicit None check — `not 0.0` is True in Python, so the
+        # old falsy guard rejected a legitimate ATM IV of exactly 0.0 (deeply
+        # OTM near expiry).  Same class of bug as the _classify_shape fix.
+        if atm_iv is None:
             return {}
 
         # Historical IV stats (lookback window)

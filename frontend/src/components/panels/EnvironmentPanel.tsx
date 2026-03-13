@@ -1,13 +1,21 @@
 import { useEnvironment } from '../../hooks/useMarket'
 import clsx from 'clsx'
 
+// Issue-10: labels must match the exact condition keys returned by
+// get_environment_score() in environment.py (C1–C10).  The previous
+// labels were completely wrong — none matched the backend keys, causing
+// the panel to fall back to displaying raw keys like "gex_declining".
 const CONDITION_LABELS: Record<string, string> = {
-  trend_bullish:   'Trend Bullish',  trend_bearish:  'Trend Bearish',
-  gex_positive:    'GEX Regime',     coc_bullish:    'CoC Bullish',
-  coc_bearish:     'CoC Bearish',    pcr_favorable:  'PCR Favorable',
-  iv_normal:       'IV Normal',      volume_ok:      'Volume OK',
-  no_spike:        'No Spike',       direction_conf: 'Dir Confidence',
-  theta_burn:      'Theta Burn OK',
+  gex_declining: 'GEX Declining',       // C1: GEX % of peak ≤ threshold
+  vcoc_signal: 'V_CoC Signal',        // C2: V_CoC velocity spike
+  fut_bs_ratio: 'Futures Flow',        // C3: Futures OBI directional
+  pcr_divergence: 'PCR Divergence',      // C4: Put-Call divergence
+  ivp_cheap: 'IV Cheap',            // C5: IVP < 50th percentile
+  obi_negative: 'ATM OBI',             // C6: ATM order book imbalance
+  term_structure_ok: 'Term Structure',      // C7: Not in backwardation
+  session_ok: 'Session',             // C8: Not midday chop
+  vex_aligned: 'VEX Aligned ★★',     // C9: VEX mechanical alignment (2 pts)
+  not_charm_distortion: "No Dealer O'Clock",   // C10: Charm distortion guard
 }
 
 export default function EnvironmentPanel() {
@@ -23,8 +31,8 @@ export default function EnvironmentPanel() {
   }
 
   const verdictClass =
-    env.verdict === 'GO'    ? 'badge-go'   :
-    env.verdict === 'WAIT'  ? 'badge-wait' : 'badge-nogo'
+    env.verdict === 'GO' ? 'badge-go' :
+      env.verdict === 'WAIT' ? 'badge-wait' : 'badge-nogo'
 
   return (
     <div className="panel h-full">
@@ -39,7 +47,7 @@ export default function EnvironmentPanel() {
           <div
             className={clsx('h-2 rounded-full transition-all', {
               'bg-bull-light': env.verdict === 'GO',
-              'bg-accent':     env.verdict === 'WAIT',
+              'bg-accent': env.verdict === 'WAIT',
               'bg-bear-light': env.verdict === 'NO_GO',
             })}
             style={{ width: `${(env.score / env.max_score) * 100}%` }}
