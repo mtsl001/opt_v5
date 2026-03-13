@@ -12,7 +12,10 @@ _ALLOWED_TRADE_COLS: frozenset[str] = frozenset({
     "s_score", "quality_grade", "direction_signals", "narrative", "status",
     "rejection_reason", "rejection_note", "session", "delta", "theta", "vega",
     "gamma", "iv_at_entry", "spot_at_entry", "conf_buckets",
-    "recommendation_snap_time",
+    # N-3 fix: removed phantom 'recommendation_snap_time' -- that column does
+    # not exist in the schema.  The correct column name is 'accept_snap_time'
+    # (added in Fix-P1-14, declared in CREATE_TRADES and _MIGRATIONS).
+    # 'accept_snap_time' is already listed above; no new entry needed here.
 })
 
 # ---------------------------------------------------------------------------
