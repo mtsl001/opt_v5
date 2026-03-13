@@ -41,7 +41,8 @@ Step 0 passes get_conn() to run_incremental_pull() so processor.py
 calls refresh_views() immediately when a new trade_date= partition
 directory is created (first tick of a new trading day).  Previously
 duck_conn=None caused the new partition to be invisible to DuckDB
-until the EOD refresh_views() call at 15:25 -- a full-day blackout.
+until the EOD refresh_views() call at 15:25 -- a full-day analytics
+blackout.
 
 P2-7: EOD done_flags always set
 ---------------------------------
@@ -59,6 +60,25 @@ done_flags is now loaded from DATA_ROOT/done_flags.json on scheduler
 creation and saved after every EOD completion.  A uvicorn hot-reload
 or process restart no longer re-triggers the EOD sweep on the first
 post-reload tick.  Writes are atomic (tmp file + os.replace).
+
+M-2: done_flags key validation on load
+----------------------------------------
+_load_done_flags() now validates every key with date.fromisoformat().
+Non-date keys (e.g. "_note" from hand-editing, or a future code change
+that accidentally writes a non-date key) are discarded with a WARNING
+rather than silently entering the dict.  Without this guard,
+sorted(done_flags)[0] would delete a non-date key instead of the oldest
+date entry, allowing stale date entries to accumulate beyond the 7-entry
+trim cap.
+
+M-3: gate_cache failure upgraded to error+exc_info
+----------------------------------------------------
+_build_gate_cache() previously logged the exception as logger.warning
+without exc_info=True, swallowing the full stack trace.  Upgraded to
+logger.error with exc_info=True so DuckDB gateway failures are visible
+in severity-based monitoring.  The fallback dict is tagged with an
+"error" key so track_open_positions() callers can distinguish a real
+NO_GO from an error-induced fallback.
 """
 import asyncio
 import json
@@ -94,13 +114,33 @@ def _load_done_flags() -> dict[str, bool]:
 
     P1-B: called once at create_scheduler() time so a hot-reload or process
     restart picks up the EOD state from the previous process instance.
+
+    M-2: every key is validated with date.fromisoformat() before entering
+    the dict.  Non-date keys (from hand-editing or a future code change)
+    are logged as WARNING and discarded so sorted(done_flags)[0] always
+    returns the oldest valid ISO date, never an unrelated string that would
+    sort before all dates and be incorrectly trimmed.
     """
     try:
         if _DONE_FLAGS_PATH.exists():
             data = json.loads(_DONE_FLAGS_PATH.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                # Keep only True entries; coerce values to bool defensively.
-                return {k: True for k, v in data.items() if v}
+                valid: dict[str, bool] = {}
+                for k, v in data.items():
+                    # M-2: validate key is a parseable ISO date before accepting.
+                    try:
+                        date.fromisoformat(k)
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "done_flags: ignoring non-date key {!r} -- "
+                            "file may have been hand-edited or contain stale data",
+                            k,
+                        )
+                        continue
+                    # Keep only True entries; coerce values to bool defensively.
+                    if v:
+                        valid[k] = True
+                return valid
     except Exception as e:
         logger.warning("done_flags load failed ({}), starting fresh: {}", _DONE_FLAGS_PATH, e)
     return {}
@@ -203,6 +243,12 @@ def _build_gate_cache(
     per (trade_date, underlying) and reuse it on subsequent calls, eliminating
     redundant full-day DuckDB peak scans across _build_gate_cache and
     generate_recommendation within the same tick.
+
+    M-3: on exception, log at ERROR with exc_info=True (not WARNING) so a
+    DuckDB gateway crash is visible in severity-based monitoring (Sentry /
+    CloudWatch).  The fallback dict is tagged with "error": str(e) so
+    track_open_positions() callers can distinguish a real NO_GO result from
+    an error-induced fallback (e.g. for per-position logging or metrics).
     """
     open_trades = get_open_trades(jconn)
     cache: dict[str, dict] = {}
@@ -226,10 +272,18 @@ def _build_gate_cache(
                 _peak_cache=_gex_peak_cache,
             )
         except Exception as e:
-            logger.warning("gate_cache pre-compute failed for {}: {}", underlying, e)
+            # M-3: ERROR + exc_info so DuckDB failures surface in monitoring.
+            # "error" key in the fallback dict lets callers distinguish a
+            # genuine NO_GO from an exception-induced NO_GO fallback.
+            logger.error(
+                "gate_cache pre-compute FAILED for {} -- using NO_GO fallback: {}",
+                underlying, e,
+                exc_info=True,
+            )
             cache[underlying] = {
                 "score": 0, "verdict": "NO_GO",
-                "conditions": {}, "session": ""
+                "conditions": {}, "session": "",
+                "error": str(e),
             }
     return cache
 
@@ -252,6 +306,7 @@ def create_scheduler(
     """
     # P1-B: load persisted done_flags so a hot-reload or process restart
     # does not re-trigger the EOD sweep on the first post-reload tick.
+    # M-2: _load_done_flags() now validates all keys as ISO dates on load.
     done_flags: dict[str, bool] = _load_done_flags()
 
     async def tick() -> None:
@@ -350,6 +405,9 @@ def create_scheduler(
                     logger.error("refresh_views failed: {}", rv_err, exc_info=True)
 
                 # Trim done_flags to last 7 entries to prevent unbounded growth.
+                # M-2: all keys are guaranteed to be valid ISO dates (validated
+                # on load and only date strings are written here), so
+                # sorted(done_flags)[0] reliably returns the oldest date.
                 if len(done_flags) > 7:
                     oldest = sorted(done_flags)[0]
                     del done_flags[oldest]
