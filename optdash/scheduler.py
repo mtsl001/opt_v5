@@ -52,8 +52,17 @@ EOD block -- wasteful and noisy.  Fix: wrap both in individual try/except
 and set done_flags[trade_date] = True unconditionally before return.
 Both functions are idempotent so re-running on a partial-failure day at
 next startup is safe (they filter ACCEPTED / is_closed=0 rows only).
+
+P1-B: done_flags persistence across hot-reloads
+-------------------------------------------------
+done_flags is now loaded from DATA_ROOT/done_flags.json on scheduler
+creation and saved after every EOD completion.  A uvicorn hot-reload
+or process restart no longer re-triggers the EOD sweep on the first
+post-reload tick.  Writes are atomic (tmp file + os.replace).
 """
 import asyncio
+import json
+import os
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
@@ -73,6 +82,49 @@ from optdash.pipeline.purge import purge_old_raw_parquets
 from optdash.pipeline.duckdb_gateway import get_conn, refresh_views
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# Path for persisting EOD done_flags across process restarts / hot-reloads.
+# Stored alongside the watermark and journal in DATA_ROOT.
+_DONE_FLAGS_PATH = Path(settings.DATA_ROOT) / "done_flags.json"
+
+
+def _load_done_flags() -> dict[str, bool]:
+    """Load done_flags from disk.  Returns {} if the file does not exist or
+    is corrupt (safe fallback: EOD will re-run at most once).
+
+    P1-B: called once at create_scheduler() time so a hot-reload or process
+    restart picks up the EOD state from the previous process instance.
+    """
+    try:
+        if _DONE_FLAGS_PATH.exists():
+            data = json.loads(_DONE_FLAGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                # Keep only True entries; coerce values to bool defensively.
+                return {k: True for k, v in data.items() if v}
+    except Exception as e:
+        logger.warning("done_flags load failed ({}), starting fresh: {}", _DONE_FLAGS_PATH, e)
+    return {}
+
+
+def _save_done_flags(done_flags: dict[str, bool]) -> None:
+    """Atomically persist done_flags to disk.
+
+    Uses tmp-file + os.replace() so a partial write (e.g. SIGKILL mid-write)
+    never corrupts the existing file.  The previous file stays intact until
+    the rename succeeds.
+
+    P1-B: called after every EOD completion so the file stays in sync with
+    the in-memory dict.
+    """
+    try:
+        _DONE_FLAGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DONE_FLAGS_PATH.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(done_flags, indent=2), encoding="utf-8"
+        )
+        os.replace(tmp, _DONE_FLAGS_PATH)
+    except Exception as e:
+        logger.warning("done_flags save failed: {}", e)
 
 
 def _now_ist() -> datetime:
@@ -198,7 +250,9 @@ def create_scheduler(
     Parquet view as the API.  duckdb_gateway.startup() must be called
     first -- deps.startup() does this automatically.
     """
-    done_flags: dict[str, bool] = {}
+    # P1-B: load persisted done_flags so a hot-reload or process restart
+    # does not re-trigger the EOD sweep on the first post-reload tick.
+    done_flags: dict[str, bool] = _load_done_flags()
 
     async def tick() -> None:
         if not _is_market_hours():
@@ -305,6 +359,11 @@ def create_scheduler(
                 # ticks.  Any cleanup is handled at next startup by idempotent
                 # get_open_trades / get_all_unclosed_shadows filters.
                 done_flags[trade_date] = True
+
+                # P1-B: persist to disk so a hot-reload / restart in the
+                # post-EOD window does not re-trigger the sweep.
+                _save_done_flags(done_flags)
+
                 return  # skip normal tick on the EOD sweep tick itself
 
             # F8: block all normal-tick work on any tick AFTER EOD has already
