@@ -118,6 +118,12 @@ def generate_recommendation(
     # Fix: if TIER1 expiry chain is absent, the data is incomplete -- skip
     # this tick and wait for the next scheduler cycle.  The skip is logged
     # as INFO so the operator knows why no recommendation was issued.
+    #
+    # M-1: _nearest_expiry() no longer has an internal try/except.  Any
+    # DuckDB error (gateway crash, dropped view, Parquet corruption) now
+    # propagates here and is caught by the P2-E guard below, which logs
+    # with exc_info=True.  This makes errors distinguishable from legitimate
+    # no-data conditions (nearest_expiry=None -> INFO log).
     try:
         nearest_expiry = _nearest_expiry(conn, trade_date, snap_time, underlying)
     except Exception:
@@ -300,14 +306,18 @@ def _nearest_expiry(
 
     Returns None when no TIER1 expiry exists for today -- caller (P1-12)
     must treat None as a hard skip, not a safe default.
+
+    M-1: internal try/except removed.  The previous bare `except Exception:
+    return None` made the caller's exc_info=True P2-E guard unreachable,
+    causing DuckDB errors (crashed gateway, dropped Parquet view) to produce
+    the same INFO log as a legitimate post-rollover no-data condition.
+    Exceptions now propagate to the caller which logs them with the full
+    stack trace so the two failure modes are distinguishable in production.
     """
-    try:
-        row = conn.execute("""
-            SELECT MIN(expiry_date) FROM options_data
-            WHERE trade_date=? AND snap_time=? AND underlying=?
-              AND expiry_tier='TIER1'
-              AND expiry_date >= ?
-        """, [trade_date, snap_time, underlying, trade_date]).fetchone()
-        return row[0] if row else None
-    except Exception:
-        return None
+    row = conn.execute("""
+        SELECT MIN(expiry_date) FROM options_data
+        WHERE trade_date=? AND snap_time=? AND underlying=?
+          AND expiry_tier='TIER1'
+          AND expiry_date >= ?
+    """, [trade_date, snap_time, underlying, trade_date]).fetchone()
+    return row[0] if row else None
