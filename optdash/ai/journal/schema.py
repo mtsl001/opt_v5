@@ -217,6 +217,13 @@ _MIGRATIONS = [
     # predicate so WHERE trade_date=? AND is_closed=0 is a single covering scan.
     "CREATE INDEX IF NOT EXISTS idx_shadow_active ON shadow_trades(trade_date, is_closed)",
 
+    # P2-D: idx_shadow_snaps_shadow_id was present in CREATE_INDEXES for fresh
+    # installs but absent from _MIGRATIONS, so existing databases never received
+    # it.  get_shadow_snaps() WHERE shadow_id=? did a full shadow_snaps table
+    # scan on every position-tracking tick.  Added here so upgrade installs
+    # get the index applied on next startup.
+    "CREATE INDEX IF NOT EXISTS idx_shadow_snaps_shadow_id ON shadow_snaps(shadow_id)",
+
     # P0-5: sl_price and target_price were present in _ALLOWED_SHADOW_COLS
     # (shadow.py) but absent from the CREATE_SHADOWS DDL and this migration
     # list.  Any create_shadow() call passing either key raised OperationalError
