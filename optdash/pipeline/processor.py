@@ -88,13 +88,21 @@ def process_and_write(df: pd.DataFrame, duck_conn=None) -> str | None:
 
     new_wm = wm_str(df["_rt"].max())
 
+    # P0-A: shared set ensures refresh_views() fires at most once per
+    # trade_date across all underlyings in this batch, regardless of how many
+    # underlyings are processed.  Each underlying that creates a new partition
+    # directory adds the trade_date to _refreshed; subsequent underlyings for
+    # the same date skip the refresh call.
+    _refreshed: set[str] = set()
+
     for underlying, u_df in df.groupby("underlying"):
         lot_size = settings.LOT_SIZES.get(str(underlying))
         if lot_size is None:
             logger.warning("No LOT_SIZES entry for {} — skipping", underlying)
             continue
         try:
-            _process_underlying(str(underlying), u_df.copy(), lot_size, duck_conn)
+            _process_underlying(str(underlying), u_df.copy(), lot_size, duck_conn,
+                                 _refreshed)
         except Exception as e:
             logger.error("processor: failed for {}: {}", underlying, e)
             raise
@@ -218,36 +226,59 @@ def _process_underlying(
     df: pd.DataFrame,
     lot_size: int,
     duck_conn,
+    _refreshed: set[str],
 ) -> None:
     """Compute FUT price, GEX/VEX/CEX, then write per-trade_date Parquets."""
     df = _compute_fut_price(df, underlying)
     df = _compute_gex_vex_cex(df, lot_size)
 
     for trade_date, td_df in df.groupby("trade_date"):
-        _write_trade_date(str(underlying), str(trade_date), td_df, duck_conn)
+        _write_trade_date(str(underlying), str(trade_date), td_df, duck_conn,
+                          _refreshed)
 
 
 def _compute_fut_price(df: pd.DataFrame, underlying: str) -> pd.DataFrame:
     """Back-fill near-month futures ltp onto all rows per snap_time.
 
-    Near-month = minimum non-negative dte among FUT rows for that snap.
+    Near-month = minimum dte > 0 among FUT rows for that snap.
+
+    P0-B: dte=0 (expiry-day settlement rows) are now excluded from the
+    near-month candidate set.  On rollover day both the expiring contract
+    (dte=0) and the new near-month (dte=7) are present in the feed.
+    The old filter (dte >= 0) always selected the expiring row because
+    sort_values("dte").first() picks the minimum.  The expiring contract's
+    ltp is the settlement-converging price — not the rolled-forward price —
+    producing wrong CoC, screener eff_ratio, and gate scores for the
+    entire rollover session without any log entry.
+
+    Fix: filter to dte > 0 so the expiry-day settlement contract is never
+    selected as near-month.  If only dte=0 futures are available (rare
+    edge case where the feed contains only the expiring contract), the
+    warning below fires and fut_price remains NaN — the correct fallback
+    rather than a stale settlement price.
+
     Merged left so OPT rows without a matching snap get NaN fut_price.
     """
     df = df.copy()
     df["fut_price"] = np.nan
 
-    # instrument_type must already be normalised to 'FUT' (done in _normalize_types)
+    # instrument_type must already be normalised to 'FUT' (done in _normalize_types).
+    # P0-B: dte > 0 — exclude expiry-day settlement rows from near-month selection.
     fut = df[
         (df["instrument_type"] == "FUT")
         & df["dte"].notna()
-        & (df["dte"] >= 0)
+        & (df["dte"] > 0)
     ].copy()
 
     if fut.empty:
-        logger.warning("No FUT rows found for {} — fut_price will be NULL", underlying)
+        logger.warning(
+            "No non-expiry FUT rows found for {} — fut_price will be NULL "
+            "(rollover day or feed gap; settlement rows with dte=0 excluded)",
+            underlying,
+        )
         return df
 
-    # Near-month: minimum dte per snap_time
+    # Near-month: minimum dte (> 0) per snap_time
     near = (
         fut.sort_values("dte")
         .groupby("snap_time", as_index=False)
@@ -276,6 +307,11 @@ def _compute_gex_vex_cex(df: pd.DataFrame, lot_size: int) -> pd.DataFrame:
 
     iv is percentage (e.g. 21.33) — divide by 100 to get decimal σ.
     dte=0 (expiry day): sqrt_t=NaN → vex/cex=NaN (GEX still valid).
+
+    Units: vex and cex are stored in Parquet already divided by 1e6
+    (i.e. in Rs M units).  vex_cex.py analytics query SUM(vex) directly
+    without any further scaling — the /1e6 here and the SQL are the
+    single point of scaling.  Do NOT add another /1e6 in analytics SQL.
 
     P0-3: vanna is clipped to [−VANNA_CLIP, +VANNA_CLIP] before the VEX
     multiplication.  Near-zero IV rows from the NSE feed produce a
@@ -324,12 +360,14 @@ def _compute_gex_vex_cex(df: pd.DataFrame, lot_size: int) -> pd.DataFrame:
         index=opts.index,
     ).replace(0, np.nan)
 
-    # VEX
+    # VEX — stored in Rs M (already divided by 1e6 = _VEX_SCALE).
+    # vex_cex.py queries SUM(vex) directly; no further /1e6 in SQL.
     vanna        = opts["delta"] * (1.0 - opts["delta"].abs()) / denom
     vanna        = vanna.clip(-settings.VANNA_CLIP, settings.VANNA_CLIP)  # P0-3
     opts["vex"]  = (opts["oi"] * lot_size * vanna * opts["spot"]) / _VEX_SCALE
 
-    # CEX
+    # CEX — stored in Rs M (already divided by 1e6 = _CEX_SCALE).
+    # vex_cex.py queries SUM(cex) directly; no further /1e6 in SQL.
     charm        = -opts["theta"] / denom
     charm        = charm.clip(-settings.CHARM_CLIP, settings.CHARM_CLIP)  # P0-2
     opts["cex"]  = (opts["oi"] * lot_size * charm) / _CEX_SCALE
@@ -343,16 +381,28 @@ def _write_trade_date(
     trade_date:  str,
     td_df:       pd.DataFrame,
     duck_conn,
+    _refreshed:  set[str],
 ) -> None:
     """Write all snaps for one (underlying, trade_date) pair.
 
     Each snap is written individually via write_snap() which handles
     read-merge-rewrite atomically under FileLock.
-    refresh_views() is called only when a new partition directory is
-    created (first write for a new trade_date).
+
+    P0-A: refresh_views() is called at most once per trade_date across
+    all underlyings processed in the same batch.  _refreshed is a set
+    passed in from process_and_write(); the first underlying that creates
+    a new partition directory triggers the refresh and adds trade_date to
+    the set.  Subsequent underlyings for the same new date skip the call,
+    preventing 4 redundant DROP+CREATE+validate cycles that would each
+    block analytics for ~50-200ms.
+
+    The new_partition flag is evaluated before write_snap() so it
+    correctly reflects whether the directory existed before this call
+    (write_snap calls mkdir internally).
     """
     data_root     = Path(settings.DATA_ROOT)
     path          = parquet_path(data_root, trade_date, underlying)
+    # P0-A: capture existence state BEFORE write_snap() creates the directory.
     new_partition = not path.parent.exists()
 
     # Select output columns in PARQUET_SCHEMA order; fill any absent with NaN
@@ -367,10 +417,14 @@ def _write_trade_date(
         trade_date, underlying, n_snaps, len(out_df),
     )
 
-    if new_partition and duck_conn is not None:
+    # P0-A: only refresh once per trade_date per batch, regardless of how
+    # many underlyings are written in this call.  RLock is reentrant so the
+    # call is safe even if the scheduler already holds _view_lock.
+    if new_partition and duck_conn is not None and trade_date not in _refreshed:
         from optdash.pipeline.duckdb_gateway import refresh_views
         try:
             refresh_views(duck_conn)
             logger.info("DuckDB view refreshed (new partition: {})", trade_date)
+            _refreshed.add(trade_date)
         except Exception as e:
             logger.error("refresh_views after new partition failed: {}", e)
