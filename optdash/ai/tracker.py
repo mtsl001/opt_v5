@@ -234,9 +234,16 @@ def expire_stale_recommendations(
     instead of raising. Parsing both sides makes the failure loud (ValueError
     in the scheduler log) rather than silently allowing stale recommendations
     to persist across sessions indefinitely.
+
+    H-3: all update_status() calls now use commit=False; a single
+    jconn.commit() after the loop issues one WAL flush for all expiries
+    (N → 1). This matches the batched-commit pattern used by eod_force_close()
+    (EOD-3) and track_open_positions() (P6-E), and makes the expiry set
+    atomic: either all land or none do on a mid-loop crash.
     """
     today_date = date.fromisoformat(trade_date)   # P1-11: parse once, reuse below
     pending = trades.get_pending_trades(jconn)
+    expired_count = 0
     for trade in pending:
         # P1-11: parse trade_date as a date object for type-safe comparison.
         # Raises ValueError (logged by scheduler) if either date string is
@@ -256,13 +263,16 @@ def expire_stale_recommendations(
             trades.update_status(
                 jconn, trade["id"], TradeStatus.EXPIRED.value,
                 state_reason="Stale recommendation from prior session -- expired on new day open",
+                commit=False,   # H-3: batch; single commit after loop
             )
             logger.info(
                 "P0-2: expired prior-session recommendation id={} "
                 "underlying={} trade_date={} (current session: {})",
                 trade["id"], trade["underlying"], trade["trade_date"], trade_date,
             )
+            expired_count += 1
             continue
+
         # Same-session intraday expiry: age out unactioned recommendations
         # after AI_EXPIRY_MAX_SNAPS × 5-minute ticks.
         age = _snaps_since(trade["snap_time"], snap_time)
@@ -270,7 +280,13 @@ def expire_stale_recommendations(
             trades.update_status(
                 jconn, trade["id"], TradeStatus.EXPIRED.value,
                 state_reason="Not actioned within expiry window",
+                commit=False,   # H-3: batch; single commit after loop
             )
+            expired_count += 1
+
+    # H-3: single WAL flush for all expiries processed in this call.
+    # If expired_count == 0 this is a no-op commit (harmless).
+    jconn.commit()
 
 
 def _minutes_since_entry(entry_snap: str, current_snap: str) -> int:
