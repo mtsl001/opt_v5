@@ -52,7 +52,7 @@ def track_open_positions(
         # via the `or` falsy coercion.  Mirrors the identical fix already
         # applied in eod.py (Fix EOD-2) and api/routers/ai.py (Fix API-2).
         # All PnL, SL, trailing-stop, and attribution calculations downstream
-        # use this value — a wrong entry here corrupts every metric for the
+        # use this value -- a wrong entry here corrupts every metric for the
         # lifetime of the position.
         _actual = trade["actual_entry_price"]
         entry   = _actual if _actual is not None else trade["entry_premium"]
@@ -72,7 +72,7 @@ def track_open_positions(
             "IN_TRADE"
         )
 
-        # Trailing stop — P4-F8: guard peak_ltp against None.
+        # Trailing stop -- P4-F8: guard peak_ltp against None.
         # snaps.get_peak_ltp() returns None on the first scheduler tick after
         # ACCEPT (no position_snaps rows exist yet). The previous code called
         # `peak_ltp * 0.90` unconditionally, raising TypeError and killing the
@@ -112,6 +112,19 @@ def track_open_positions(
         # Falls back to fresh computation if called without cache (e.g. direct API).
         if gate_cache and underlying in gate_cache:
             gate = gate_cache[underlying]
+            # M-3: gate_cache entries built by _build_gate_cache() fall back to
+            # {"score": 0, "verdict": "NO_GO", "error": str(e)} on exception.
+            # Log a warning here so a caching failure is visible per-trade in
+            # the scheduler log, rather than silently appearing as a real NO_GO
+            # and potentially triggering spurious GATE_NO_GO exits.
+            if gate.get("error"):
+                logger.warning(
+                    "track_open_positions: gate for {} is an error fallback "
+                    "(cache build failed: {}). NO_GO verdict may be misleading "
+                    "for trade id={}; position will not be force-exited on this "
+                    "verdict alone.",
+                    underlying, gate["error"], trade["id"],
+                )
         else:
             gate = get_environment_score(
                 conn, trade_date, snap_time, underlying, direction=opt_type
@@ -138,7 +151,7 @@ def track_open_positions(
             },
         )
 
-        # Write snap — P6-E: commit=False batches all snaps for this tick.
+        # Write snap -- P6-E: commit=False batches all snaps for this tick.
         # Auto-close path (trades.close_trade, commit=True default) will flush
         # the buffered snap + the CLOSED update together atomically if the
         # position exits. For positions that stay open, the single jconn.commit()
@@ -287,6 +300,13 @@ def expire_stale_recommendations(
     # H-3: single WAL flush for all expiries processed in this call.
     # If expired_count == 0 this is a no-op commit (harmless).
     jconn.commit()
+    # H-3: summary log so scheduler output shows how many were swept per tick.
+    if expired_count > 0:
+        logger.info(
+            "expire_stale_recommendations: {} recommendation(s) expired "
+            "(trade_date={} snap_time={}).",
+            expired_count, trade_date, snap_time,
+        )
 
 
 def _minutes_since_entry(entry_snap: str, current_snap: str) -> int:
@@ -312,12 +332,12 @@ def _consecutive_no_go_count(jconn: sqlite3.Connection, trade_id: int) -> int:
     the last 10 rows, so the threshold could never be reached without any
     error or log warning. Fix:
       1. Read n from settings at call time so LIMIT always matches the threshold.
-      2. RuntimeError replaces assert — guard fires even under python -O.
+      2. RuntimeError replaces assert -- guard fires even under python -O.
       3. Embed n into LIMIT via f-string (safe: n is an int from settings,
          not user-controlled input).
     """
     n = settings.GATE_SUSTAINED_NO_GO_SNAPS
-    # RuntimeError replaces assert — fires even under python -O.
+    # RuntimeError replaces assert -- fires even under python -O.
     # Outside the inner try-except so misconfiguration propagates to the
     # scheduler tick error handler rather than being swallowed as return 0.
     if not (1 <= n <= 50):

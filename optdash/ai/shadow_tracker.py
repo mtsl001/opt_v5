@@ -73,15 +73,16 @@ def track_shadow_positions(
             commit=not is_closing,   # False → snap stays uncommitted until close_shadow()
         )
 
-        # Close shadow if SL or target is hit intra-day.
-        # EOD close is handled by finalize_all_shadows() in eod.py.
         if is_closing:
             outcome = _classify_shadow_outcome(pnl)
             # H-2b: compute monetary PnL using the same formula as
-            # finalize_all_shadows() so opportunity-cost Rs figures are
-            # available for intraday-closed shadows (SL/target hit) as well
-            # as EOD-closed ones.  Shadows always use entry_premium as cost
-            # basis -- no actual fill for hypotheticals.
+            # finalize_all_shadows() in eod.py so opportunity-cost Rs figures
+            # are populated for intraday-closed shadows (SL/target hit) as well
+            # as EOD-closed ones.  Without this, any shadow that hit SL or
+            # target before EOD wrote final_pnl_abs=NULL, making the majority
+            # of CLEAN_MISS and GOOD_SKIP rows useless for Rs reporting.
+            # Shadows always use entry_premium as cost basis -- no actual fill
+            # for hypotheticals.
             lot     = settings.LOT_SIZES.get(s["underlying"], 1)
             pnl_abs = round((ltp - s["entry_premium"]) * lot, 2)
             shadow.close_shadow(jconn, s["id"], {
