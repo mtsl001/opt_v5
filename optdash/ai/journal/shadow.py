@@ -9,7 +9,7 @@ import sqlite3
 _ALLOWED_SHADOW_COLS: frozenset[str] = frozenset({
     "trade_id", "trade_date", "underlying", "option_type",
     "strike_price", "expiry_date", "entry_premium",
-    "final_pnl_pct", "outcome", "closed_snap", "is_closed",
+    "final_pnl_pct", "final_pnl_abs", "outcome", "closed_snap", "is_closed",
     "sl_price", "target_price",
 })
 
@@ -116,12 +116,27 @@ def close_shadow(
     close_shadow() calls can be batched atomically (P1-3: used by
     finalize_all_shadows() in eod.py to wrap all EOD shadow closes in a
     single try/rollback block, preventing a partial-close state on failure).
+
+    H-2: final_pnl_abs (monetary, lot-adjusted) is now persisted alongside
+    final_pnl_pct so opportunity-cost Rs figures are available in reports.
+    Callers that do not compute pnl_abs (e.g. legacy paths) may omit the key;
+    the column will remain NULL for those rows.
     """
     conn.execute(
         """UPDATE shadow_trades
-           SET is_closed=1, final_pnl_pct=?, outcome=?, closed_snap=?
+           SET is_closed=1,
+               final_pnl_pct=?,
+               final_pnl_abs=?,
+               outcome=?,
+               closed_snap=?
            WHERE id=?""",
-        [data["final_pnl_pct"], data["outcome"], data["closed_snap"], shadow_id]
+        [
+            data["final_pnl_pct"],
+            data.get("final_pnl_abs"),   # None-safe: omitted by callers that don't compute it
+            data["outcome"],
+            data["closed_snap"],
+            shadow_id,
+        ]
     )
     if commit:
         conn.commit()
