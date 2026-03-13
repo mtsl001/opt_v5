@@ -48,6 +48,35 @@ class Settings(BaseSettings):
     SCHEDULER_INTERVAL_SECONDS: int = 300  # 5-min tick
     WS_INTERVAL_SECONDS:        int = 5    # WebSocket push cadence
 
+    # M-5: WS_INTERVAL_SECONDS must be:
+    #   > 0                          -- asyncio.sleep(0) is a tight loop that
+    #                                   saturates the event loop, starving the
+    #                                   scheduler tick and all HTTP handlers.
+    #   < SCHEDULER_INTERVAL_SECONDS -- WS must push faster than the scheduler
+    #                                   refreshes data; equal or greater means
+    #                                   the live dashboard shows stale state.
+    # Validator is placed after SCHEDULER_INTERVAL_SECONDS so info.data
+    # contains the scheduler value when this check runs (pydantic validates
+    # in field declaration order).
+    @field_validator("WS_INTERVAL_SECONDS")
+    @classmethod
+    def _check_ws_interval(cls, v: int, info) -> int:
+        if v <= 0:
+            raise ValueError(
+                f"WS_INTERVAL_SECONDS must be > 0, got {v}. "
+                "Setting to 0 creates an asyncio.sleep(0) tight loop that "
+                "starves the scheduler tick and all HTTP/WS handlers."
+            )
+        scheduler_secs = (info.data or {}).get("SCHEDULER_INTERVAL_SECONDS", 300)
+        if v >= scheduler_secs:
+            raise ValueError(
+                f"WS_INTERVAL_SECONDS={v} must be less than "
+                f"SCHEDULER_INTERVAL_SECONDS={scheduler_secs}. "
+                "The WebSocket push cadence must be faster than the scheduler "
+                "refresh rate, otherwise the live dashboard shows stale data."
+            )
+        return v
+
     MARKET_OPEN:          str = "09:15"
     MARKET_CLOSE:         str = "15:30"
     EOD_FORCE_CLOSE_TIME: str = "15:20"
@@ -269,11 +298,25 @@ class Settings(BaseSettings):
         "NIFTY": 0.50, "BANKNIFTY": 0.50, "FINNIFTY": 0.25,
         "MIDCPNIFTY": 0.15, "NIFTYNXT50": 0.15,
     }
-    CEX_STRONG_BID:      float = 20.0
-    CEX_BID:             float = 5.0
-    CEX_PRESSURE:        float = -20.0
-    DEALER_OCLOCK_DTE:   int   = 1
-    DEALER_OCLOCK_START: str   = "14:00"
+    CEX_STRONG_BID:    float = 20.0
+    CEX_BID:           float = 5.0
+    CEX_PRESSURE:      float = -20.0
+    DEALER_OCLOCK_DTE: int   = 1
+
+    # M-4: DEALER_OCLOCK_START is intentionally EARLIER than SESSION_CLOSING_START
+    # (14:00 vs 14:30).  On DTE=1, dealer delta-hedging (charm flow) intensifies
+    # from ~14:00, before the session boundary at 14:30.  Gate condition C10
+    # uses DEALER_OCLOCK_START independently from C8 (SESSION_CLOSING_START) so
+    # the 30-minute overlap window (14:00–14:30) correctly receives -1 gate point
+    # (C10 fails: Dealer O'Clock active) while C8 stays +1 (still AFTERNOON
+    # session, not MIDDAY_CHOP).
+    #
+    # !! DO NOT align these two values without re-calibrating the C8+C10
+    # interaction in environment.py.  Aligning them to 14:30 silently removes
+    # 30 minutes of DTE=1 charm-distortion protection with no test failure or
+    # lint warning. !!
+    DEALER_OCLOCK_START: str = "14:00"
+
     # Per-underlying CEX magnitude thresholds (Rs M) - scaled to index liquidity.
     CEX_CHARM_THRESHOLD: dict[str, float] = {
         "NIFTY": 20.0, "BANKNIFTY": 20.0, "FINNIFTY": 10.0,
@@ -361,6 +404,9 @@ class Settings(BaseSettings):
     SESSION_OPENING_END:   str = "10:15"
     SESSION_MIDDAY_START:  str = "11:30"
     SESSION_MIDDAY_END:    str = "13:00"
+    # SESSION_CLOSING_START marks the AFTERNOON→CLOSING_CRUSH boundary (C8).
+    # See DEALER_OCLOCK_START below for the related DTE=1 C10 boundary which
+    # is intentionally set 30 minutes earlier at 14:00.
     SESSION_CLOSING_START: str = "14:30"
 
     # -- AI Recommender
