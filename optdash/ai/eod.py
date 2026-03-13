@@ -129,6 +129,10 @@ def finalize_all_shadows(
     a single jconn.commit() at the end makes every shadow close atomic.
     On any exception, jconn.rollback() leaves all shadows open so the next
     EOD run retries the full sweep cleanly (no partial-close state).
+
+    H-2: final_pnl_abs (monetary, lot-adjusted) is now computed and included
+    in the close payload so opportunity-cost Rs figures are available in the
+    learning report. Lot size is resolved from settings.LOT_SIZES.
     """
     shadows = shadow.get_all_unclosed_shadows(jconn)
     if not shadows:
@@ -149,10 +153,16 @@ def finalize_all_shadows(
         _ltp_raw = (current or {}).get("ltp")
         ltp      = _ltp_raw if _ltp_raw is not None else s["entry_premium"]
 
-        pnl     = round((ltp - s["entry_premium"]) / s["entry_premium"] * 100, 2)
-        outcome = _classify_shadow_outcome(pnl)
+        pnl_pct = round((ltp - s["entry_premium"]) / s["entry_premium"] * 100, 2)
+        outcome = _classify_shadow_outcome(pnl_pct)
+
+        # H-2: compute monetary PnL for opportunity-cost Rs reporting.
+        lot     = settings.LOT_SIZES.get(s["underlying"], 1)
+        pnl_abs = round((ltp - s["entry_premium"]) * lot, 2)
+
         close_payloads.append((s, {
-            "final_pnl_pct": pnl,
+            "final_pnl_pct": pnl_pct,
+            "final_pnl_abs": pnl_abs,
             "outcome":       outcome,
             "closed_snap":   settings.EOD_FORCE_CLOSE_TIME,
         }))
@@ -164,8 +174,9 @@ def finalize_all_shadows(
         for s, payload in close_payloads:
             shadow.close_shadow(jconn, s["id"], payload, commit=False)
             logger.debug(
-                "EOD shadow close: id={} date={} outcome={} pnl={:+.1f}%",
-                s["id"], s["trade_date"], payload["outcome"], payload["final_pnl_pct"]
+                "EOD shadow close: id={} date={} outcome={} pnl={:+.1f}% pnl_abs={}",
+                s["id"], s["trade_date"], payload["outcome"],
+                payload["final_pnl_pct"], payload["final_pnl_abs"],
             )
         jconn.commit()
         logger.info(
