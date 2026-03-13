@@ -74,18 +74,25 @@ def track_shadow_positions(
         )
 
         # Close shadow if SL or target is hit intra-day.
-        # EOD close is handled by finalize_all_shadows() in eod.py
-        # (called by scheduler before this function runs).
+        # EOD close is handled by finalize_all_shadows() in eod.py.
         if is_closing:
             outcome = _classify_shadow_outcome(pnl)
+            # H-2b: compute monetary PnL using the same formula as
+            # finalize_all_shadows() so opportunity-cost Rs figures are
+            # available for intraday-closed shadows (SL/target hit) as well
+            # as EOD-closed ones.  Shadows always use entry_premium as cost
+            # basis -- no actual fill for hypotheticals.
+            lot     = settings.LOT_SIZES.get(s["underlying"], 1)
+            pnl_abs = round((ltp - s["entry_premium"]) * lot, 2)
             shadow.close_shadow(jconn, s["id"], {
                 "final_pnl_pct": pnl,
+                "final_pnl_abs": pnl_abs,
                 "outcome":       outcome,
                 "closed_snap":   snap_time,
             })  # close_shadow() always commits — this is the single flush
             logger.debug(
-                "Shadow {} closed intra-day: outcome={} pnl={:+.1f}%",
-                s["id"], outcome, pnl
+                "Shadow {} closed intra-day: outcome={} pnl={:+.1f}% pnl_abs={}",
+                s["id"], outcome, pnl, pnl_abs,
             )
 
 
