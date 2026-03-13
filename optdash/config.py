@@ -13,7 +13,6 @@ class Settings(BaseSettings):
 
     # -- Paths
     DATA_ROOT:       Path = Path("./data")
-    DUCKDB_PATH:     Path = Path("./data/optdash.duckdb")
     JOURNAL_DB_PATH: Path = Path("./data/journal.db")
 
     # -- API
@@ -77,12 +76,11 @@ class Settings(BaseSettings):
     # The scheduler reads this via settings.MARKET_HOLIDAYS; a missing / empty
     # list simply disables the holiday skip without any error.
     #
-    # 2026 NSE TRADING holidays (dates where NSE is in closed_exchanges).
+    # 2026 NSE TRADING holidays (dates where NSE is closed).
     # Source: Upstox market-holidays API (verified Mar 2026).
     # Excluded: settlement-only dates (Feb-19, Mar-19, Apr-01, Aug-26) and
     # Diwali Muhurat session (Nov-08) where NSE trades with modified hours.
     MARKET_HOLIDAYS: list[str] = [
-        "2026-01-15",  # Municipal Corporation Election
         "2026-01-26",  # Republic Day
         "2026-03-03",  # Holi
         "2026-03-26",  # Ram Navami
