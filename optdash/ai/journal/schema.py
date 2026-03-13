@@ -119,6 +119,10 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
     sl_price        REAL,
     target_price    REAL,
     final_pnl_pct   REAL,
+    -- H-2: monetary (lot-adjusted) PnL, mirrors final_pnl_abs on trades.
+    -- Populated by eod.finalize_all_shadows() and shadow_tracker.close_shadow()
+    -- so opportunity-cost reporting in Rs is possible for rejected trades.
+    final_pnl_abs   REAL,
     outcome         TEXT,               -- ShadowOutcome enum value
     closed_snap     TEXT,
     is_closed       INTEGER DEFAULT 0,
@@ -231,6 +235,12 @@ _MIGRATIONS = [
     # these ALTER TABLE entries backfill existing databases.
     "ALTER TABLE shadow_trades ADD COLUMN sl_price     REAL",
     "ALTER TABLE shadow_trades ADD COLUMN target_price REAL",
+
+    # H-2: final_pnl_abs (monetary, lot-adjusted) added to shadow_trades so
+    # opportunity-cost reporting in Rs is possible for rejected/expired trades.
+    # Mirrors final_pnl_abs on the trades table.  Populated by
+    # eod.finalize_all_shadows() and shadow_tracker (intraday close path).
+    "ALTER TABLE shadow_trades ADD COLUMN final_pnl_abs REAL",
 ]
 
 
