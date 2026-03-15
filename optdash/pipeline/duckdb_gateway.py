@@ -114,6 +114,67 @@ REQUIRED_COLUMNS: frozenset[str] = frozenset({
 # P1-P2-4: LockedConn -- thread-safe proxy for DuckDBPyConnection
 # ---------------------------------------------------------------------------
 
+
+class LockedResult:
+    """Proxy that holds _view_lock until the result is consumed.
+
+    WHY THIS EXISTS
+    ---------------
+    DuckDB in-process connections share a single result set slot.  If Thread A
+    calls .execute() and then Thread B calls .execute() before Thread A calls
+    .fetchall(), Thread A's result set is replaced — causing a NULL shared_ptr
+    dereference crash inside DuckDB's C++ layer.
+
+    LockedResult keeps the lock held across the entire execute→fetch lifecycle
+    so no other thread can mutate the connection state in between.
+    """
+
+    __slots__ = ("_real", "_released")
+
+    def __init__(self, real: duckdb.DuckDBPyConnection) -> None:
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_released", False)
+
+    def _release(self) -> None:
+        if not self._released:
+            object.__setattr__(self, "_released", True)
+            _view_lock.release()
+
+    # ── Result consumption methods (release lock after fetching) ──────────
+
+    def fetchall(self):
+        try:
+            return self._real.fetchall()
+        finally:
+            self._release()
+
+    def fetchone(self):
+        try:
+            return self._real.fetchone()
+        finally:
+            self._release()
+
+    def fetchdf(self):
+        try:
+            return self._real.fetchdf()
+        finally:
+            self._release()
+
+    def fetchnumpy(self):
+        try:
+            return self._real.fetchnumpy()
+        finally:
+            self._release()
+
+    @property
+    def description(self):
+        return self._real.description
+
+    def __del__(self) -> None:
+        # Safety net: release lock if result was never consumed.
+        self._release()
+
+
 class LockedConn:
     """Thin proxy around DuckDBPyConnection that serialises every execute()
     call through _view_lock.
@@ -130,6 +191,12 @@ class LockedConn:
     function that forgot it silently raced.  LockedConn makes the protection
     structural: callers cannot call .execute() without going through the lock.
 
+    THREAD SAFETY (post-fix)
+    ------------------------
+    .execute() acquires _view_lock and returns a LockedResult proxy.  The lock
+    is held until the caller consumes the result via .fetchall()/.fetchone().
+    This prevents Thread B from clobbering Thread A's pending result set.
+
     USAGE
     -----
     Callers obtain a LockedConn from get_conn() and use it exactly like a
@@ -138,20 +205,7 @@ class LockedConn:
         conn = get_conn()            # returns LockedConn
         row  = conn.execute(sql, params).fetchone()
 
-    Existing `with view_lock(): conn.execute(...)` patterns are still correct
-    -- RLock is reentrant, so the double-acquire is a no-op.
-
-    WHAT IS PROXIED
-    ---------------
-    .execute() and .executemany() -- the only entry points used by analytics.
-    All other attribute accesses (fetchall, fetchone, description, close,
-    context-manager protocol) are delegated to _real unchanged.
-
-    THREAD SAFETY OF _real
-    -----------------------
-    LockedConn holds _view_lock for the duration of the .execute() call.
-    DuckDB executes the query synchronously inside that call, so the
-    connection is never accessed concurrently by two threads.
+    The lock is acquired at .execute() and released at .fetchone()/.fetchall().
     """
 
     __slots__ = ("_real",)
@@ -162,22 +216,31 @@ class LockedConn:
     # ── Locked entry points ────────────────────────────────────────────────
 
     def execute(self, query: str, parameters=None):
-        """Acquire _view_lock, delegate to real .execute(), release on exit."""
+        """Acquire _view_lock, execute query, return LockedResult.
+
+        The lock stays held until the caller calls .fetchone()/.fetchall()
+        on the returned LockedResult — preventing concurrent threads from
+        clobbering the DuckDB result set.
+        """
         _view_lock.acquire()
         try:
             if parameters is not None:
-                return self._real.execute(query, parameters)
-            return self._real.execute(query)
-        finally:
+                self._real.execute(query, parameters)
+            else:
+                self._real.execute(query)
+            return LockedResult(self._real)
+        except Exception:
             _view_lock.release()
+            raise
 
     def executemany(self, query: str, parameters=None):
         """Acquire _view_lock, delegate to real .executemany(), release on exit."""
         _view_lock.acquire()
         try:
             if parameters is not None:
-                return self._real.executemany(query, parameters)
-            return self._real.executemany(query)
+                self._real.executemany(query, parameters)
+            else:
+                self._real.executemany(query)
         finally:
             _view_lock.release()
 
@@ -335,10 +398,13 @@ def refresh_views(
     # queries that plan against the view name during the swap window.
     with _view_lock:
         try:
+            # DDL statements (CREATE VIEW) do not support prepared parameters
+            # in DuckDB — the glob list must be interpolated directly.
+            # Safe: paths are generated internally by _build_rolling_globs().
+            glob_list_sql = "[" + ", ".join(f"'{g}'" for g in globs) + "]"
             real.execute(
-                "CREATE OR REPLACE VIEW options_data AS "
-                "SELECT * FROM read_parquet($1, hive_partitioning=true, union_by_name=true)",
-                [globs],
+                f"CREATE OR REPLACE VIEW options_data AS "
+                f"SELECT * FROM read_parquet({glob_list_sql}, hive_partitioning=true, union_by_name=true)"
             )
             logger.info(
                 "options_data view registered -- {} day partition(s) in rolling window",

@@ -102,7 +102,7 @@ _PARTITION_PREFIX  = "trade_date="
 PARQUET_SCHEMA = pa.schema([
     pa.field("snap_time",       pa.string(),  nullable=False),
     pa.field("underlying",      pa.string(),  nullable=False),
-    pa.field("strike_price",    pa.float64(), nullable=False),
+    pa.field("strike_price",    pa.float64(), nullable=True),   # NULL for FUT rows
     pa.field("expiry_date",     pa.string(),  nullable=False),
     pa.field("option_type",     pa.string(),  nullable=True),   # NULL for FUT rows
     pa.field("instrument_type", pa.string(),  nullable=True),

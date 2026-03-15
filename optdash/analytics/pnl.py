@@ -126,6 +126,11 @@ def build_theta_sl_series(trade: dict, snaps: list[dict]) -> list[dict]:
     Uses actual_entry_price (slippage-adjusted fill) when set, falling back to
     entry_premium. This matches the same fallback pattern used in tracker.py
     and eod.py, ensuring the SL curve is anchored to the real fill price.
+
+    Issue-R13: the first snap is now included in the result.  Previously
+    it was used only as the `prev` reference and never appended, causing
+    the chart to start at the second snap.  For quick SL-hit trades with
+    only 1-2 snaps, this produced an empty or single-point chart.
     """
     sl_multiplier = 1.0 - settings.AI_SL_PCT   # consistent with compute_theta_sl
     result  = []

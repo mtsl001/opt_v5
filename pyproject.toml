@@ -35,6 +35,14 @@ dependencies = [
     "scipy>=1.13.0",
     "py_vollib>=1.0.1",
     "websockets>=12.0",
+    # tenacity: exponential-backoff retry decorator used by bq_client.py for
+    # BigQuery pull operations (4 attempts, 4↑60s wait).
+    "tenacity>=8.2",
+    # google-cloud-bigquery: BQ client used by bq_client.py for pulling
+    # live and historical NSE option chain data.
+    "google-cloud-bigquery>=3.10",
+    "db-dtypes>=1.2.0",  # Required by google-cloud-bigquery for to_dataframe()
+    "google-cloud-bigquery-storage>=2.20.0",  # Fast gRPC stream for to_dataframe()
     # python-dotenv removed: it is a transitive dependency of pydantic-settings
     # and does not need to be pinned independently here.
 ]

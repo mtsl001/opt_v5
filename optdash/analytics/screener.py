@@ -44,7 +44,7 @@ def get_strikes(
         # relying on (? IS NULL OR ...) to sidestep DuckDB NULL param issues.
         direction_clause = "AND o.option_type = ?" if direction else ""
 
-        rows = conn.execute(f"""
+        result = conn.execute(f"""
             WITH spot_cte AS (
                 SELECT AVG(spot) AS spot
                 FROM options_data
@@ -112,13 +112,14 @@ def get_strikes(
             *([direction] if direction else []),
             settings.STAR_4_THRESHOLD, settings.STAR_3_THRESHOLD, settings.STAR_2_THRESHOLD,
             top_n,
-        ]).fetchall()
+        ])
 
-        cols = [
-            "expiry_date", "expiry_tier", "dte", "option_type", "strike_price",
-            "ltp", "iv", "delta", "theta", "gamma", "vega",
-            "moneyness_pct", "liquidity_cr", "eff_ratio", "s_score", "stars",
-        ]
+        # Issue-R11: derive column names from the cursor description instead of
+        # a hardcoded list.  If the SQL SELECT changes (add/remove a computed
+        # column), the output dict automatically reflects it — no manual sync
+        # needed and no silent value-shift bugs.
+        cols = [d[0] for d in result.description]
+        rows = result.fetchall()
         return [
             {k: (round(v, 4) if isinstance(v, float) else v)
              for k, v in zip(cols, r)}

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useLivePosition, useCloseTrade } from '../../hooks/useAI'
 import { useDashboardStore } from '../../store/dashboardStore'
+import type { PositionLive } from '../../types'
 import clsx from 'clsx'
 
 export default function LivePositionPanel() {
@@ -18,7 +19,7 @@ export default function LivePositionPanel() {
     )
   }
 
-  if (!data || (data as any).status === 'NO_POSITION') {
+  if (!data || (data as Record<string, unknown>).status === 'NO_POSITION') {
     return (
       <div className="panel h-full">
         <div className="panel-title">Live Position</div>
@@ -27,11 +28,13 @@ export default function LivePositionPanel() {
     )
   }
 
-  const pos     = data as any
-  const pnlPct  = pos.pnl_pct ?? 0
+  // Issue-R5: typed cast instead of `as any` — all property accesses are
+  // now compile-time checked against the PositionLive interface.
+  const pos = data as PositionLive
+  const pnlPct = pos.pnl_pct ?? 0
   const pnlClass = pnlPct >= 0 ? 'val-bull' : 'val-bear'
-  const isCall   = pos.option_type === 'CE'
-  const typeClass= isCall ? 'text-bull-light' : 'text-bear-light'
+  const isCall = pos.option_type === 'CE'
+  const typeClass = isCall ? 'text-bull-light' : 'text-bear-light'
 
   return (
     <div className="panel h-full">
@@ -39,7 +42,7 @@ export default function LivePositionPanel() {
         <span>Live Position</span>
         {pos.gate_verdict && (
           <span className={clsx({
-            'badge-go':   pos.gate_verdict === 'GO',
+            'badge-go': pos.gate_verdict === 'GO',
             'badge-wait': pos.gate_verdict === 'WAIT',
             'badge-nogo': pos.gate_verdict === 'NO_GO',
           })}>{pos.gate_verdict}</span>
@@ -88,9 +91,9 @@ export default function LivePositionPanel() {
           disabled={close.isPending || !exitPrice}
           onClick={() =>
             close.mutate({
-              tradeId:   pos.id,
+              tradeId: pos.id,
               exitPrice: parseFloat(exitPrice),
-              snapTime:  selectedSnapTime,
+              snapTime: selectedSnapTime,
             })
           }
         >

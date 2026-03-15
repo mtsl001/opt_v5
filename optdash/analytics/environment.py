@@ -113,6 +113,11 @@ def get_environment_score(
         }
 
         # C6: ATM OBI significant (1 pt)
+        # Issue-R8: key is "obi_negative" for historical reasons but C6 awards
+        # a point when OBI magnitude exceeds the threshold IN EITHER direction.
+        # For CE trades negative OBI = retail panic puts = contrarian bullish.
+        # For PE trades positive OBI = retail panic calls = contrarian bearish.
+        # Both are valid entry signals on an options BUYING dashboard.
         c6_met = abs(obi) > settings.OBI_THRESHOLD
         conditions["obi_negative"] = {
             "met": c6_met, "value": round(obi, 4),

@@ -111,7 +111,7 @@ def get_bq_client():
 
             creds = service_account.Credentials.from_service_account_file(
                 str(settings.BQ_CREDENTIALS_PATH),
-                scopes=["https://www.googleapis.com/auth/bigquery.readonly"],
+                scopes=["https://www.googleapis.com/auth/bigquery"],
             )
             _bq_client = bigquery.Client(
                 project=settings.BQ_PROJECT,

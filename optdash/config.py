@@ -222,10 +222,15 @@ class Settings(BaseSettings):
     # BACKFILL_END_DATE:   leave empty ("") to auto-set to yesterday at runtime.
     # ENABLE_BACKFILL:     set False to skip backfill on startup (e.g. after
     #                      first full load, or during development).
+    # ENABLE_GAP_FILL:     set False to skip gap fill on startup (e.g. during
+    #                      development without BQ credentials, or when data is
+    #                      already fully current).  Mirror of ENABLE_BACKFILL --
+    #                      set both=false together for local dev without BQ.
     WATERMARK_PATH:      Path = Path("./data/watermark.json")
     BACKFILL_START_DATE: str  = "2026-02-17"
     BACKFILL_END_DATE:   str  = ""
     ENABLE_BACKFILL:     bool = True
+    ENABLE_GAP_FILL:     bool = True
 
     # P1-4: validate BACKFILL_START_DATE as a strict ISO date (YYYY-MM-DD) at
     # Settings construction time.  Without this, a bad format (e.g. "17-02-2026"

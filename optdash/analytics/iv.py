@@ -44,6 +44,12 @@ def get_ivr_ivp(
             return {}
 
         # Historical IV stats (lookback window)
+        # DuckDB cannot parameterize INTERVAL literals, so we compute the
+        # lookback date in Python (same pattern as the IVP query below).
+        hist_start = (
+            datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=settings.IV_LOOKBACK_DAYS)
+        ).strftime("%Y-%m-%d")
+
         hist = conn.execute("""
             SELECT
                 MIN(daily_atm_iv) AS iv_low,
@@ -54,10 +60,10 @@ def get_ivr_ivp(
                 FROM options_data
                 WHERE underlying=? AND expiry_tier='TIER1'
                   AND trade_date < ?
-                  AND trade_date >= (date(?) - INTERVAL ? DAY)
+                  AND trade_date >= ?
                 GROUP BY trade_date
             )
-        """, [underlying, trade_date, trade_date, settings.IV_LOOKBACK_DAYS]).fetchone()
+        """, [underlying, trade_date, hist_start]).fetchone()
 
         iv_low    = hist[0] if hist and hist[0] else atm_iv * 0.5
         iv_high   = hist[1] if hist and hist[1] else atm_iv * 1.5

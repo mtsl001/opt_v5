@@ -121,15 +121,20 @@ def _get_vex_cex_series(conn, trade_date, underlying) -> list[dict]:
 def _get_by_strike(conn, trade_date, snap_time, underlying) -> list[dict]:
     try:
         rows = conn.execute("""
-            SELECT strike_price, option_type,
-                   (strike_price - AVG(spot) OVER()) / NULLIF(AVG(spot) OVER(), 0) * 100 AS moneyness_pct,
-                   SUM(vex) AS vex_M,
-                   SUM(cex) AS cex_M,
-                   SUM(oi) AS oi, AVG(iv) AS iv, MIN(dte) AS dte
-            FROM options_data
-            WHERE trade_date=? AND snap_time=? AND underlying=? AND expiry_tier='TIER1'
-            GROUP BY strike_price, option_type ORDER BY strike_price
-        """, [trade_date, snap_time, underlying]).fetchall()
+            WITH spot_cte AS (
+                SELECT AVG(spot) AS spot FROM options_data
+                WHERE trade_date=? AND snap_time=? AND underlying=?
+            )
+            SELECT o.strike_price, o.option_type,
+                   (o.strike_price - s.spot) / NULLIF(s.spot, 0) * 100 AS moneyness_pct,
+                   SUM(o.vex) AS vex_M,
+                   SUM(o.cex) AS cex_M,
+                   SUM(o.oi) AS oi, AVG(o.iv) AS iv, MIN(o.dte) AS dte
+            FROM options_data o, spot_cte s
+            WHERE o.trade_date=? AND o.snap_time=? AND o.underlying=? AND o.expiry_tier='TIER1'
+            GROUP BY o.strike_price, o.option_type, s.spot ORDER BY o.strike_price
+        """, [trade_date, snap_time, underlying,
+              trade_date, snap_time, underlying]).fetchall()
         return [{
             "strike_price": r[0], "option_type": r[1],
             # Fix VEX-2: return None for missing/zero spot rows instead of

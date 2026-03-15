@@ -49,3 +49,5 @@ frontend/.env
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+universal-ion-437606-b7-5629bd4bc421.json

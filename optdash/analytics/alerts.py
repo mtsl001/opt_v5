@@ -69,24 +69,36 @@ def get_alerts(
                             f"{'institutional long accumulation' if vcoc > 0 else 'institutional unwinding'}.",
                 ))
         elif len(coc_w) == 1 and coc_w[0]["signal"] in _velocity_signals:
-            # Single snap in window (e.g. market just opened) -- fire once.
-            vcoc = coc_w[0].get("v_coc_15m", 0)
-            dir_ = "CE" if vcoc > 0 else "PE"
-            alerts.append(_make_alert(
-                time=coc_w[0]["snap_time"],
-                type_=AlertType.COC_VELOCITY,
-                severity=AlertSeverity.HIGH,
-                direction=dir_,
-                headline=f"V_CoC velocity spike: {vcoc:+.1f}",
-                message=f"Cost-of-carry velocity {vcoc:+.1f} indicates "
-                        f"{'institutional long accumulation' if vcoc > 0 else 'institutional unwinding'}.",
-            ))
+            # Issue-R6: suppress single-snap V_CoC alert at 09:15 (opening auction).
+            # The opening snap frequently carries an anomalous V_CoC from the
+            # overnight settlement gap, producing a false HIGH alert on the first
+            # tick of every trading day.  Suppressing only 09:15 preserves the
+            # single-snap path for genuine early-session velocity spikes at 09:20+.
+            if coc_w[0]["snap_time"] != "09:15":
+                vcoc = coc_w[0].get("v_coc_15m", 0)
+                dir_ = "CE" if vcoc > 0 else "PE"
+                alerts.append(_make_alert(
+                    time=coc_w[0]["snap_time"],
+                    type_=AlertType.COC_VELOCITY,
+                    severity=AlertSeverity.HIGH,
+                    direction=dir_,
+                    headline=f"V_CoC velocity spike: {vcoc:+.1f}",
+                    message=f"Cost-of-carry velocity {vcoc:+.1f} indicates "
+                            f"{'institutional long accumulation' if vcoc > 0 else 'institutional unwinding'}.",
+                ))
 
         # Alert: PCR divergence threshold cross (already has transition guard)
+        # Issue-R1: use config thresholds (matching C4 gate + direction.py Signal 5)
+        # instead of hardcoded 0.20.  This ensures tuning PCR_DIV_*_THRESHOLD in
+        # .env consistently affects gate, direction, AND alerts together.
         if len(pcr_w) >= 2:
             cur  = pcr_w[-1]["pcr_divergence"]
             prev = pcr_w[-2]["pcr_divergence"]
-            if abs(cur) > 0.20 and abs(prev) <= 0.20:
+            bull_thr = settings.PCR_DIV_BULL_THRESHOLD
+            bear_thr = settings.PCR_DIV_BEAR_THRESHOLD
+            cur_diverged = cur > bull_thr or cur < bear_thr
+            prev_normal  = bull_thr >= prev >= bear_thr
+            if cur_diverged and prev_normal:
                 dir_   = "CE" if cur > 0 else "PE"
                 sev    = AlertSeverity.HIGH if abs(cur) > 0.30 else AlertSeverity.MEDIUM
                 label  = "Retail panic puts" if cur > 0 else "Retail panic calls"

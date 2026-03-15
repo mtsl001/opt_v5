@@ -57,6 +57,10 @@ _VEX_SCALE = 1e6   # Rs M — matches vex_cex.py / 1e6 divisor
 _CEX_SCALE = 1e6
 
 # Output column order — MUST match PARQUET_SCHEMA field order in writer.py exactly.
+# Issue-R12: any column added/removed here must also be updated in
+# writer.py::PARQUET_SCHEMA (for dtype enforcement) and vice versa.
+# Enrichment columns computed by this module: gex, vex, cex, expiry_tier, dte.
+# All other columns are extracted/renamed directly from the BQ feed.
 _OUT_COLS = [
     "snap_time", "underlying", "strike_price", "expiry_date",
     "option_type", "instrument_type", "ltp", "iv", "delta", "theta",
@@ -94,11 +98,12 @@ def process_and_write(df: pd.DataFrame, duck_conn=None) -> str | None:
     # directory adds the trade_date to _refreshed; subsequent underlyings for
     # the same date skip the refresh call.
     _refreshed: set[str] = set()
+    _skipped: list[str] = []
 
     for underlying, u_df in df.groupby("underlying"):
         lot_size = settings.LOT_SIZES.get(str(underlying))
         if lot_size is None:
-            logger.warning("No LOT_SIZES entry for {} — skipping", underlying)
+            _skipped.append(str(underlying))
             continue
         try:
             _process_underlying(str(underlying), u_df.copy(), lot_size, duck_conn,
@@ -106,6 +111,12 @@ def process_and_write(df: pd.DataFrame, duck_conn=None) -> str | None:
         except Exception as e:
             logger.error("processor: failed for {}: {}", underlying, e)
             raise
+
+    if _skipped:
+        logger.debug(
+            "processor: skipped {} underlyings not in LOT_SIZES (stock F&O)",
+            len(_skipped),
+        )
 
     return new_wm
 
@@ -372,7 +383,10 @@ def _compute_gex_vex_cex(df: pd.DataFrame, lot_size: int) -> pd.DataFrame:
     charm        = charm.clip(-settings.CHARM_CLIP, settings.CHARM_CLIP)  # P0-2
     opts["cex"]  = (opts["oi"] * lot_size * charm) / _CEX_SCALE
 
-    df.loc[mask, ["gex", "vex", "cex"]] = opts[["gex", "vex", "cex"]].values
+    # Explicit float64 cast avoids FutureWarning about setting incompatible
+    # dtype (opts may contain pd.NA from nullable-int OI arithmetic).
+    for col in ("gex", "vex", "cex"):
+        df.loc[mask, col] = opts[col].astype("float64").values
     return df
 
 

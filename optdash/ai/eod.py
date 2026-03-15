@@ -141,6 +141,19 @@ def finalize_all_shadows(
     # ── Read phase: pre-fetch all LTPs before any writes ──────────────────────
     close_payloads: list[tuple[dict, dict]] = []
     for s in shadows:
+        # Issue-R4: guard against NULL expiry_date (schema allows nullable).
+        # SQL WHERE expiry_date=? with NULL param always returns 0 rows
+        # (NULL = NULL is FALSE), silently skipping this shadow and leaving
+        # final_pnl_pct permanently NULL.  Log and skip so the operator
+        # can repair the malformed row manually.
+        if not s.get("expiry_date"):
+            logger.warning(
+                "finalize_all_shadows: shadow id={} missing expiry_date, "
+                "cannot fetch final LTP -- skipping",
+                s["id"],
+            )
+            continue
+
         shadow_date = s["trade_date"]   # use shadow's own date, not today
         current = _fetch_strike_current(
             conn, shadow_date, settings.EOD_FORCE_CLOSE_TIME,

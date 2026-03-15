@@ -15,9 +15,19 @@ S_score normalisation:
 """
 from optdash.config import settings
 
-# 99th-percentile S_score for well-screened options on the 0–150 scale.
-# Derived from: max_raw_sum × 10 = 150; typical top-of-range ≈ 120.
-_SSCORE_NORM = 120.0
+# Issue-R17: derive normaliser dynamically from config weights so tuning
+# any W_* in .env automatically updates quality grade normalisation.
+# Practical 99th-pct is ~80% of theoretical max for well-screened options.
+_SSCORE_MAX = (
+    settings.W_DELTA * 0.50  # delta capped at SCREENER_MAX_DELTA (0.50)
+    + settings.W_EFF_RATIO
+    + settings.W_LIQUIDITY
+    + settings.W_IV
+    + settings.W_THETA
+    + settings.W_GAMMA
+    + settings.W_VEGA
+) * 10
+_SSCORE_NORM = _SSCORE_MAX * 0.80  # practical 99th-pct range
 
 
 def compute_quality_score(strike: dict, gate_score: int, confidence: int) -> dict:

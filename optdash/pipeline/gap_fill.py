@@ -46,6 +46,10 @@ def run_gap_fill(duck_conn=None) -> None:
     Iterates over every trading day from (watermark_date + 1) through today
     inclusive, pulling rows from upxtx that are newer than the watermark.
     """
+    if not settings.ENABLE_GAP_FILL:
+        logger.info("Gap fill disabled (ENABLE_GAP_FILL=false) — skipping")
+        return
+
     wm      = wm_load()
     wm_dt   = datetime.strptime(wm, "%Y-%m-%d %H:%M:%S")
     wm_date = wm_dt.date()
