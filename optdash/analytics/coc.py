@@ -1,4 +1,12 @@
-"""Cost-of-Carry analytics -- CoC velocity, ATM OBI, Futures OBI."""
+"""Cost-of-Carry analytics -- CoC velocity, ATM OBI, Futures OBI.
+
+CoC-3 (v2.3.0): OBI functions now use bid1_qty/ask1_qty (instantaneous
+Level-1 order book depth) instead of bid_qty/ask_qty (cumulative day
+buy/sell totals). bid_qty/ask_qty grow monotonically and are a poor proxy
+for live order book pressure. bid1_qty/ask1_qty reflect the resting queue
+at the best bid/ask right now. COALESCE guards handle NULL depth on
+illiquid/far-OTM strikes.
+"""
 import duckdb
 from loguru import logger
 from optdash.config import settings
@@ -89,16 +97,16 @@ def get_atm_obi(conn: duckdb.DuckDBPyConnection, trade_date: str,
                   AND o.expiry_tier = 'TIER1'
             ),
             atm AS (
-                SELECT o.option_type, o.bid_qty, o.ask_qty
+                SELECT o.option_type, o.bid1_qty, o.ask1_qty
                 FROM options_data o, spot_cte s, min_dist m
                 WHERE o.trade_date=? AND o.snap_time=? AND o.underlying=?
                   AND o.expiry_tier = 'TIER1'
                   AND ABS(o.strike_price - s.spot) = m.md
             )
             SELECT
-                SUM(CASE WHEN option_type='CE' THEN (bid_qty - ask_qty) ELSE 0 END) AS ce_flow,
-                SUM(CASE WHEN option_type='PE' THEN (bid_qty - ask_qty) ELSE 0 END) AS pe_flow,
-                SUM(bid_qty + ask_qty) AS total_qty
+                SUM(CASE WHEN option_type='CE' THEN (COALESCE(bid1_qty,0) - COALESCE(ask1_qty,0)) ELSE 0 END) AS ce_flow,
+                SUM(CASE WHEN option_type='PE' THEN (COALESCE(bid1_qty,0) - COALESCE(ask1_qty,0)) ELSE 0 END) AS pe_flow,
+                SUM(COALESCE(bid1_qty,0) + COALESCE(ask1_qty,0)) AS total_qty
             FROM atm
         """, [
             trade_date, snap_time, underlying,   # spot_cte
@@ -119,8 +127,8 @@ def get_futures_obi(conn: duckdb.DuckDBPyConnection, trade_date: str,
     try:
         row = conn.execute("""
             SELECT
-                SUM(bid_qty - ask_qty)        AS net_flow,
-                SUM(bid_qty + ask_qty)        AS total_qty
+                SUM(COALESCE(bid1_qty,0) - COALESCE(ask1_qty,0)) AS net_flow,
+                SUM(COALESCE(bid1_qty,0) + COALESCE(ask1_qty,0)) AS total_qty
             FROM options_data
             WHERE trade_date=? AND snap_time=? AND underlying=?
               AND instrument_type='FUT'
