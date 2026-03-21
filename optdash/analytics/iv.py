@@ -147,6 +147,13 @@ def get_ivr_ivp(
             "UNKNOWN"
         )
 
+        india_vix      = get_india_vix(trade_date, snap_time)
+        vix_regime     = (
+            "HIGH" if india_vix is not None and india_vix > settings.VIX_HIGH_THRESHOLD
+            else "NORMAL" if india_vix is not None
+            else "UNKNOWN"
+        )
+
         return {
             "atm_iv":       round(atm_iv, 2),
             "ivr":          ivr,
@@ -158,6 +165,8 @@ def get_ivr_ivp(
             "vrp":          vrp,
             "iv_hv_spread": vrp,        # backward-compat alias — keeps frontend working
             "vrp_regime":   vrp_regime,
+            "india_vix":    round(india_vix, 2) if india_vix is not None else None,
+            "vix_regime":   vix_regime,
             "shape":        get_term_structure(
                                 conn, trade_date, snap_time, underlying
                             ).get("shape", "FLAT"),
@@ -235,3 +244,41 @@ def _classify_shape(
     if slope < settings.TS_BACKWARDATION_SLOPE:
         return TermStructureShape.BACKWARDATION.value
     return TermStructureShape.FLAT.value
+
+def get_india_vix(trade_date: str, snap_time: str) -> float | None:
+    """Read India VIX for the given snap from the VIX parquet side-file.
+
+    VIX data lives outside the main options_data DuckDB view — it is stored
+    at data/processed/vix/trade_date=YYYY-MM-DD/vix.parquet and must be
+    read directly with read_parquet(), not via the conn object.
+
+    Returns the float VIX value, or None if the file does not exist yet
+    (e.g. market not open, VIX pull lagging, or first startup).
+    Non-fatal by design — a VIX read failure must never crash IV analytics.
+    """
+    try:
+        from pathlib import Path
+        import pyarrow.parquet as pq
+        vix_path = (
+            Path(settings.DATA_ROOT) / "vix"
+            / f"trade_date={trade_date}" / "vix.parquet"
+        )
+        if not vix_path.exists():
+            return None
+        table = pq.read_table(
+            vix_path,
+            columns=["snap_time", "india_vix"],
+            filters=[("snap_time", "==", snap_time)],
+        )
+        if table.num_rows == 0:
+            # Exact snap not found — return latest available snap
+            full = pq.read_table(vix_path, columns=["snap_time", "india_vix"])
+            df = full.to_pandas().dropna(subset=["india_vix"])
+            if df.empty:
+                return None
+            return float(df.sort_values("snap_time").iloc[-1]["india_vix"])
+        val = table.to_pandas()["india_vix"].iloc[0]
+        return float(val) if val is not None else None
+    except Exception as e:
+        logger.debug("get_india_vix: read failed (non-critical) — {}", e)
+        return None
