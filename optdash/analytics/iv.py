@@ -120,8 +120,8 @@ def get_ivr_ivp(
                     SELECT
                         trade_date,
                         LN(
-                            MAX(spot) /
-                            LAG(MAX(spot)) OVER (ORDER BY trade_date)
+                            LAST(spot ORDER BY snap_time) /
+                            LAG(LAST(spot ORDER BY snap_time)) OVER (ORDER BY trade_date)
                         ) AS daily_ret
                     FROM options_data
                     WHERE underlying=? AND trade_date <= ?
