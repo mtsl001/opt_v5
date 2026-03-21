@@ -170,8 +170,7 @@ Time window: true wall-clock 15 min (not snap count), computed via HH:MM cutoff.
 
 **ATM OBI** — options order flow at the at-the-money strike:
 ```
-OBI = (CE_bid_flow - CE_ask_flow) - (PE_bid_flow - PE_ask_flow)
-           / total_qty
+OBI = [(CE_bid_flow - CE_ask_flow) - (PE_bid_flow - PE_ask_flow)] / total_qty
 ```
 
 **Futures OBI** — institutional futures positioning:
