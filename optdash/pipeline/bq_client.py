@@ -204,3 +204,39 @@ def pull_day_gap(trade_date_str: str, from_watermark: str, table_fqn: str) -> pd
     df = get_bq_client().query(query).to_dataframe()
     logger.info("pull_day_gap {}: {} rows", trade_date_str, len(df))
     return df
+
+
+@retry(
+    retry=retry_if_exception_type(Exception),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    reraise=True,
+)
+def pull_vix_incremental(watermark: str, table_fqn: str) -> pd.DataFrame:
+    """Pull INDEX rows from upxtx_vix with record_time > watermark.
+
+    upxtx_vix contains India VIX and ~30 NSE index values recorded at the
+    same 1-min cadence as upxtx.  We filter to instrument_type = 'INDEX'
+    to exclude any future schema additions.
+
+    Returns a DataFrame with columns:
+      record_time, underlying, ltp
+
+    P1-3: same IST/UTC seam as pull_incremental — watermark must be a bare
+    'YYYY-MM-DD HH:MM:SS' string.  _assert_watermark_format() is the tripwire.
+    """
+    _assert_watermark_format(watermark)   # P1-3 tripwire
+    query = (
+        f"SELECT record_time, underlying, ltp "
+        f"FROM `{table_fqn}` "
+        f"WHERE instrument_type = 'INDEX' "
+        f"  AND record_time > TIMESTAMP('{watermark}') "
+        f"ORDER BY record_time"
+    )
+    logger.debug("BQ pull_vix_incremental: watermark={}", watermark)
+    df = get_bq_client().query(query).to_dataframe()
+    if not df.empty:
+        logger.info(
+            "pull_vix_incremental: {} index rows since {}", len(df), watermark
+        )
+    return df

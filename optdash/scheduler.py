@@ -1,8 +1,10 @@
 """APScheduler -- drives recommendation generation and position tracking.
 
 Tick structure (every SCHEDULER_INTERVAL_SECONDS, market hours only):
-  0. Live BQ incremental pull (Step 0)
+  0a. Live BQ incremental pull (options)
                                   -> pull new snaps from upxtx since watermark
+  0b. VIX side-pull (non-fatal)
+                                  -> pull India VIX + indices from upxtx_vix
   1. Expire stale pending recommendations  -> once per tick (all underlyings)
   2. Pre-compute gate cache for open trades -> once per tick (all open positions)
   3. Generate recommendations              -> once per underlying
@@ -21,8 +23,8 @@ silently with 'Table options_data not found'.
 SQLite connection
 -----------------
 The scheduler reuses the shared SQLite connection passed in via
-journal_conn (owned by deps.startup / app.state.journal).  The old
-pattern (_make_jconn per tick) opened a new connection every 5 minutes,
+job journal_conn (owned by deps.startup / app.state.journal).  The old
+pattern (_make_jconn per tick) opened a new connection every 1 minute,
 creating ~72 open/close cycles per trading day and bypassing the shared
 WAL-mode connection already maintained by the API layer.
 
@@ -348,6 +350,17 @@ def create_scheduler(
                 logger.error("Incremental BQ pull failed @ {}: {}", snap_time, inc_err)
             await asyncio.sleep(0)
 
+            # -- Step 0b: VIX side-pull (non-fatal) ---------------------------
+            # Pull India VIX + index values from upxtx_vix into processed/vix/.
+            # Completely independent watermark and storage path from the main
+            # options pull — a VIX outage never blocks options ingestion.
+            try:
+                from optdash.pipeline.vix_pipeline import run_vix_pull
+                await asyncio.to_thread(run_vix_pull)
+            except Exception as vix_err:
+                logger.error("VIX pull failed @ {}: {}", snap_time, vix_err)
+            await asyncio.sleep(0)
+
             # -- EOD sweep (once per calendar day) ----------------------------
             if _is_eod() and not _eod_done_today(done_flags):
                 logger.info("Running EOD sweep for {}", trade_date)
@@ -395,6 +408,14 @@ def create_scheduler(
                     )
                 except Exception as purge_err:
                     logger.error("raw Parquet purge failed: {}", purge_err)
+
+                # GEX-4: clear stale peak cache so tomorrow's first tick
+                # recomputes peak from fresh data, not yesterday's values.
+                try:
+                    from optdash.analytics.gex import reset_peak_cache
+                    reset_peak_cache(trade_date)
+                except Exception as gex_cache_err:
+                    logger.warning("GEX peak cache reset failed: {}", gex_cache_err)
 
                 # Roll the DuckDB view forward so tomorrow's new partition
                 # directory is visible on the first tick after midnight.

@@ -13,6 +13,11 @@ BQ → Parquet column mapping (full):
   oi                  → oi (int64)
   total_buy_qty       → bid_qty (int64)
   total_sell_qty      → ask_qty (int64)
+  open                → open (float64)
+  depth_bid1_qty      → bid1_qty (int64)    ◄ NEW: live L1 best-bid qty
+  depth_bid1_price    → bid1_price (float64) ◄ NEW: live L1 best-bid price
+  depth_ask1_qty      → ask1_qty (int64)    ◄ NEW: live L1 best-ask qty
+  depth_ask1_price    → ask1_price (float64) ◄ NEW: live L1 best-ask price
   iv/delta/theta/gamma/vega → direct (float64)
   (computed)          → fut_price (near-FUT ltp back-filled per snap_time)
   (computed)          → dte ((expiry_date − trade_date).days)
@@ -63,9 +68,22 @@ _CEX_SCALE = 1e6
 # All other columns are extracted/renamed directly from the BQ feed.
 _OUT_COLS = [
     "snap_time", "underlying", "strike_price", "expiry_date",
-    "option_type", "instrument_type", "ltp", "iv", "delta", "theta",
+    "option_type", "instrument_type", "ltp", "open", "iv", "delta", "theta",
     "gamma", "vega", "spot", "fut_price", "oi", "volume",
-    "bid_qty", "ask_qty", "gex", "vex", "cex", "expiry_tier", "dte",
+    "bid_qty", "ask_qty",
+    # 5-level bid depth (L1 = best bid, L5 = deepest)
+    "bid1_qty", "bid1_price", "bid1_orders",
+    "bid2_qty", "bid2_price", "bid2_orders",
+    "bid3_qty", "bid3_price", "bid3_orders",
+    "bid4_qty", "bid4_price", "bid4_orders",
+    "bid5_qty", "bid5_price", "bid5_orders",
+    # 5-level ask depth (L1 = best ask, L5 = deepest)
+    "ask1_qty", "ask1_price", "ask1_orders",
+    "ask2_qty", "ask2_price", "ask2_orders",
+    "ask3_qty", "ask3_price", "ask3_orders",
+    "ask4_qty", "ask4_price", "ask4_orders",
+    "ask5_qty", "ask5_price", "ask5_orders",
+    "gex", "vex", "cex", "expiry_tier", "dte",
 ]
 
 
@@ -171,6 +189,22 @@ def _normalize_types(df: pd.DataFrame) -> pd.DataFrame:
     # bid_qty / ask_qty from cumulative day buy/sell totals
     df["bid_qty"] = pd.to_numeric(df["total_buy_qty"],  errors="coerce").astype("Int64")
     df["ask_qty"] = pd.to_numeric(df["total_sell_qty"], errors="coerce").astype("Int64")
+
+    # Level-1..5 order book depth — live bid/ask state at this snap.
+    # Distinct from bid_qty/ask_qty (cumulative day totals).
+    # NULL when fewer than N levels exist (illiquid / far-OTM strikes).
+    # Loop handles all 5 levels DRY-ly; qty/orders → Int64, price → float64.
+    for lvl in range(1, 6):
+        for side in ("bid", "ask"):
+            src_q = f"depth_{side}{lvl}_qty"
+            src_p = f"depth_{side}{lvl}_price"
+            src_o = f"depth_{side}{lvl}_orders"
+            df[f"{side}{lvl}_qty"]    = pd.to_numeric(df.get(src_q), errors="coerce").astype("Int64")
+            df[f"{side}{lvl}_price"]  = pd.to_numeric(df.get(src_p), errors="coerce")
+            df[f"{side}{lvl}_orders"] = pd.to_numeric(df.get(src_o), errors="coerce").astype("Int64")
+
+    # open: intrabar open price (new field; absent in older BQ pulls → NaN)
+    df["open"] = pd.to_numeric(df.get("open"), errors="coerce")
 
     # Greek + price casts to float64
     for col in ["strike_price", "iv", "delta", "theta", "gamma", "vega"]:

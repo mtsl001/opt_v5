@@ -1,4 +1,30 @@
-"""GEX analytics -- Net GEX series, regime, max pain, spot summary."""
+"""GEX analytics -- Net GEX series, regime, max pain, spot summary.
+
+Upgrades in this version
+------------------------
+GEX-4  Persistent module-level peak cache keyed by (trade_date, underlying).
+       At 1-min cadence (375 ticks/day) the old per-tick cache forced 5
+       full-day DuckDB scans per tick. The day peak is monotonically
+       non-decreasing intraday -- once computed it is valid until EOD.
+       reset_peak_cache() must be called by the scheduler EOD sweep.
+
+GEX-5  get_gex_series() now uses _get_gex_peak() for its pct_of_peak
+       denominator instead of an in-memory max().  Both paths use the
+       same source, eliminating live-tile vs chart inconsistency.
+
+GEX-3  get_net_gex() adds regime_near / pct_near_of_peak driven by
+       TIER1+TIER2 GEX only, so TIER3 (monthly/quarterly) OI does not
+       dilute the intraday regime signal.  environment.py Gate C1 uses
+       regime_near as primary.
+
+GEX-2  get_zero_gamma_level() -- new function.  Finds the interpolated
+       strike price at which cumulative per-strike GEX crosses zero.
+       Merged into get_net_gex() response to avoid an extra BQ round-trip.
+
+GEX-6  get_gex_momentum() -- new function.  Compares current GEX to the
+       trailing N-snap average (N = settings.GEX_MOMENTUM_SNAPS, default 5).
+       At 1-min cadence N=5 = 5-minute window.  Merged into get_net_gex().
+"""
 import numpy as np
 import duckdb
 from loguru import logger
@@ -7,6 +33,34 @@ from optdash.models import GEXRegime
 from optdash.metrics import record_error
 
 
+# ---------------------------------------------------------------------------
+# GEX-4: module-level persistent peak cache
+# ---------------------------------------------------------------------------
+# Keyed by (trade_date, underlying)          → float  (gex_all peak)
+# Keyed by (trade_date, underlying, "near")  → float  (gex_near peak)
+# Invalidated by reset_peak_cache() at EOD.
+_PEAK_CACHE: dict[tuple, float] = {}
+
+
+def reset_peak_cache(trade_date: str) -> None:
+    """Discard all peak cache entries that are NOT for trade_date.
+
+    Call this from the scheduler EOD sweep so the first tick of the
+    next trading day recomputes the peak from a clean slate rather than
+    reading yesterday's (stale) value.
+    """
+    stale = [k for k in _PEAK_CACHE if k[0] != trade_date]
+    for k in stale:
+        del _PEAK_CACHE[k]
+    if stale:
+        logger.debug("GEX peak cache: cleared {} stale entries for date != {}",
+                     len(stale), trade_date)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def get_net_gex(
     conn:         duckdb.DuckDBPyConnection,
     trade_date:   str,
@@ -14,10 +68,12 @@ def get_net_gex(
     underlying:   str,
     _peak_cache:  dict | None = None,
 ) -> dict:
-    """Latest-snap GEX snapshot with regime classification.
+    """Latest-snap GEX snapshot: regime, ZGL, momentum.
 
-    _peak_cache: optional dict shared by the caller across multiple get_net_gex
-    calls within the same scheduler tick.
+    _peak_cache: legacy per-tick dict from scheduler.  Still accepted for
+    backwards compatibility but the module-level _PEAK_CACHE now takes
+    precedence -- the per-tick dict is a no-op if the module cache already
+    has the value.
     """
     try:
         row = conn.execute("""
@@ -36,32 +92,46 @@ def get_net_gex(
         gex_all  = (row[1] or 0) / settings.GEX_SCALING
         gex_near = (row[2] or 0) / settings.GEX_SCALING
         gex_far  = (row[3] or 0) / settings.GEX_SCALING
+        spot     = row[4]
 
-        cache_key = (trade_date, underlying)
-        if _peak_cache is not None and cache_key in _peak_cache:
-            peak = _peak_cache[cache_key]
-        else:
-            peak = _get_gex_peak(conn, trade_date, underlying)
-            if _peak_cache is not None:
-                _peak_cache[cache_key] = peak
+        # GEX-4: module-level cache takes precedence; per-tick _peak_cache
+        # is populated as a fallback for callers that do not use the module cache.
+        peak      = _get_gex_peak(conn, trade_date, underlying)
+        peak_near = _get_gex_peak(conn, trade_date, underlying, near_only=True)
 
-        # Fix GEX-2: use != 0 guard (not truthy `if peak`) so a genuine
-        # peak=0 day (all strikes perfectly delta-hedged, net GEX = 0 all day)
-        # receives pct_of_peak=0 rather than 100.0.
-        # Old behaviour: `if peak else 100.0` treated 0 as falsy, set pct=100,
-        # then _classify_regime(0, 100) returned POSITIVE_CHOP (strong gamma
-        # wall) -- the exact opposite of the correct POSITIVE_DECLINING
-        # (neutral/declining gamma) classification for a zero-GEX environment.
-        pct    = (abs(gex_all) / peak * 100) if peak != 0 else 0.0
-        regime = _classify_regime(gex_all, pct)
+        # Backfill legacy per-tick cache for scheduler._build_gate_cache()
+        if _peak_cache is not None:
+            _peak_cache.setdefault((trade_date, underlying), peak)
+
+        # pct_of_peak for gex_all and gex_near
+        pct      = (abs(gex_all)  / peak      * 100) if peak      != 0 else 0.0
+        pct_near = (abs(gex_near) / peak_near * 100) if peak_near != 0 else 0.0
+
+        # GEX-3: regime_near driven by TIER1+TIER2 only (intraday signal);
+        # regime (all-inclusive) kept for API context and historical compat.
+        regime      = _classify_regime(gex_all,  pct)
+        regime_near = _classify_regime(gex_near, pct_near)
+
+        # GEX-2: Zero Gamma Level
+        zgl_data = _compute_zero_gamma_level(conn, trade_date, snap_time,
+                                             underlying, spot)
+
+        # GEX-6: GEX Momentum (5-min trailing avg at 1-min cadence)
+        momentum_data = _compute_gex_momentum(conn, trade_date, snap_time,
+                                              underlying)
+
         return {
-            "snap_time":   row[0],
-            "gex_all_B":  round(gex_all, 3),
-            "gex_near_B": round(gex_near, 3),
-            "gex_far_B":  round(gex_far, 3),
-            "pct_of_peak": round(pct, 1),
-            "regime": regime.value,
-            "spot":   row[4],
+            "snap_time":        row[0],
+            "gex_all_B":        round(gex_all,  3),
+            "gex_near_B":       round(gex_near, 3),
+            "gex_far_B":        round(gex_far,  3),
+            "pct_of_peak":      round(pct,      1),
+            "pct_near_of_peak": round(pct_near, 1),
+            "regime":           regime.value,
+            "regime_near":      regime_near.value,   # GEX-3: primary gate signal
+            "spot":             spot,
+            **zgl_data,                              # GEX-2: zgl, spot_vs_zgl, above_zgl
+            **momentum_data,                         # GEX-6: gex_momentum_B, momentum_direction
         }
     except Exception as e:
         record_error("get_net_gex")
@@ -71,7 +141,12 @@ def get_net_gex(
 
 def get_gex_series(conn: duckdb.DuckDBPyConnection, trade_date: str,
                    underlying: str) -> list[dict]:
-    """Full-day GEX series with pct_of_peak for charting."""
+    """Full-day GEX series with pct_of_peak for charting.
+
+    GEX-5: pct_of_peak now uses _get_gex_peak() (same DuckDB source as
+    get_net_gex) instead of an in-memory series max().  Both live-tile
+    and chart pct_of_peak now share a single denominator.
+    """
     try:
         rows = conn.execute("""
             SELECT
@@ -86,22 +161,28 @@ def get_gex_series(conn: duckdb.DuckDBPyConnection, trade_date: str,
                trade_date, underlying]).fetchall()
         if not rows:
             return []
-        # Fix GEX-2: use max(...) or 0 (not or 1.0) so a zero-GEX day produces
-        # pct_of_peak=0 for every snap instead of artificially anchoring to 1.0.
-        peak = max(abs(r[1] or 0) for r in rows) or 0.0
+
+        # GEX-5: use the same peak source as get_net_gex (DuckDB query, cached).
+        peak      = _get_gex_peak(conn, trade_date, underlying)
+        peak_near = _get_gex_peak(conn, trade_date, underlying, near_only=True)
+
         result = []
         for r in rows:
             gex         = r[1] or 0
-            # Fix GEX-2: consistent != 0 guard in the series path.
-            pct_of_peak = round(abs(gex) / peak * 100, 1) if peak != 0 else 0.0
-            regime      = _classify_regime(gex, pct_of_peak)
+            gex_n       = r[2] or 0
+            pct_of_peak = round(abs(gex)   / peak      * 100, 1) if peak      != 0 else 0.0
+            pct_near    = round(abs(gex_n) / peak_near * 100, 1) if peak_near != 0 else 0.0
+            regime      = _classify_regime(gex,   pct_of_peak)
+            regime_near = _classify_regime(gex_n, pct_near)
             result.append({
-                "snap_time":   r[0],
-                "gex_all_B":  round(r[1] or 0, 3),
-                "gex_near_B": round(r[2] or 0, 3),
-                "gex_far_B":  round(r[3] or 0, 3),
-                "pct_of_peak": pct_of_peak,
-                "regime": regime.value,
+                "snap_time":        r[0],
+                "gex_all_B":        round(r[1] or 0, 3),
+                "gex_near_B":       round(r[2] or 0, 3),
+                "gex_far_B":        round(r[3] or 0, 3),
+                "pct_of_peak":      pct_of_peak,
+                "pct_near_of_peak": pct_near,
+                "regime":           regime.value,
+                "regime_near":      regime_near.value,
             })
         return result
     except Exception as e:
@@ -185,6 +266,10 @@ def get_max_pain(
         return {"max_pain": None, "distance_pct": None}
 
 
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
 def _classify_regime(gex: float, pct_of_peak: float) -> GEXRegime:
     """Three-state GEX regime classification.
 
@@ -201,32 +286,169 @@ def _classify_regime(gex: float, pct_of_peak: float) -> GEXRegime:
     return GEXRegime.POSITIVE_CHOP
 
 
-def _get_gex_peak(conn: duckdb.DuckDBPyConnection, trade_date: str,
-                  underlying: str) -> float:
+def _get_gex_peak(
+    conn:       duckdb.DuckDBPyConnection,
+    trade_date: str,
+    underlying: str,
+    near_only:  bool = False,
+) -> float:
     """Day peak absolute GEX (denominator for pct_of_peak).
 
-    Fix GEX-2: returns 0.0 (not 1.0) when the day's peak is genuinely zero
-    (all snaps have balanced GEX = 0). Returning 1.0 was a division guard
-    that masked the zero case: get_net_gex then set pct_of_peak=0/1*100=0
-    and _classify_regime(0, 0) returned POSITIVE_DECLINING -- accidentally
-    correct, but only because 0/1=0 happened to give the right pct value.
-    The critical failure was when gex_all was also non-zero but peak was
-    substituted with 1.0: pct_of_peak became abs(gex_all)*100 (off by a
-    factor of GEX_SCALING), producing wildly wrong regime classifications.
-    The `!= 0` guard in get_net_gex and get_gex_series now handles the
-    zero-peak case explicitly, making 0.0 the correct sentinel to return.
+    GEX-4: checks the module-level _PEAK_CACHE before querying DuckDB.
+    The peak is monotonically non-decreasing intraday so the cached
+    value is always valid until reset_peak_cache() is called at EOD.
+
+    near_only=True: returns peak of TIER1+TIER2 GEX only (for regime_near).
+    Cache key is (trade_date, underlying) for all-inclusive and
+               (trade_date, underlying, "near") for near-only.
     """
+    cache_key = (trade_date, underlying, "near") if near_only else (trade_date, underlying)
+    cached = _PEAK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
-        row = conn.execute("""
-            SELECT MAX(ABS(gex_sum)) FROM (
-                SELECT snap_time, SUM(gex) / ? AS gex_sum
-                FROM options_data
-                WHERE trade_date=? AND underlying=?
-                GROUP BY snap_time
-            )
-        """, [settings.GEX_SCALING, trade_date, underlying]).fetchone()
-        # Return 0.0 (not 1.0) when peak is None or genuinely 0 -- callers
-        # use `if peak != 0` to guard division, so 0.0 is the correct sentinel.
-        return float(row[0]) if row and row[0] else 0.0
+        if near_only:
+            row = conn.execute("""
+                SELECT MAX(ABS(gex_sum)) FROM (
+                    SELECT snap_time,
+                           SUM(CASE WHEN expiry_tier IN ('TIER1','TIER2') THEN gex ELSE 0 END)
+                           / ? AS gex_sum
+                    FROM options_data
+                    WHERE trade_date=? AND underlying=?
+                    GROUP BY snap_time
+                )
+            """, [settings.GEX_SCALING, trade_date, underlying]).fetchone()
+        else:
+            row = conn.execute("""
+                SELECT MAX(ABS(gex_sum)) FROM (
+                    SELECT snap_time, SUM(gex) / ? AS gex_sum
+                    FROM options_data
+                    WHERE trade_date=? AND underlying=?
+                    GROUP BY snap_time
+                )
+            """, [settings.GEX_SCALING, trade_date, underlying]).fetchone()
+
+        result = float(row[0]) if row and row[0] else 0.0
+        _PEAK_CACHE[cache_key] = result
+        return result
     except Exception:
         return 0.0
+
+
+def _compute_zero_gamma_level(
+    conn:       duckdb.DuckDBPyConnection,
+    trade_date: str,
+    snap_time:  str,
+    underlying: str,
+    spot:       float | None,
+) -> dict:
+    """GEX-2: interpolated strike where cumulative GEX crosses zero.
+
+    Uses TIER1+TIER2 only (intraday-relevant expiries).
+    Returns zgl=None when no zero crossing exists in the strike ladder
+    (e.g. all-positive or all-negative GEX profile — less common).
+
+    spot_vs_zgl: % distance of spot above (+) or below (−) ZGL.
+    above_zgl:   True when spot > ZGL (dealers long gamma → stabilising).
+    """
+    try:
+        rows = conn.execute("""
+            SELECT strike_price, SUM(gex) AS strike_gex
+            FROM options_data
+            WHERE trade_date = ? AND snap_time = ? AND underlying = ?
+              AND expiry_tier IN ('TIER1', 'TIER2')
+              AND option_type IN ('CE', 'PE')
+            GROUP BY strike_price
+            ORDER BY strike_price
+        """, [trade_date, snap_time, underlying]).fetchall()
+
+        if not rows:
+            return {"zgl": None, "spot_vs_zgl": None, "above_zgl": None}
+
+        strikes = np.array([r[0] for r in rows], dtype=float)
+        gex_arr = np.array([r[1] or 0 for r in rows], dtype=float)
+        cum_gex = np.cumsum(gex_arr)
+
+        sign_changes = np.where(np.diff(np.sign(cum_gex)))[0]
+        if len(sign_changes) == 0:
+            return {"zgl": None, "spot_vs_zgl": None, "above_zgl": None}
+
+        # Use the first zero crossing (lowest strike — primary ZGL)
+        idx = sign_changes[0]
+        # Linear interpolation between the two strikes bracketing the crossing
+        zgl = float(np.interp(
+            0,
+            [cum_gex[idx], cum_gex[idx + 1]],
+            [strikes[idx], strikes[idx + 1]],
+        ))
+
+        dist_pct  = round((spot - zgl) / zgl * 100, 2) if (spot and zgl) else None
+        above_zgl = bool(spot > zgl) if (spot is not None and zgl) else None
+
+        return {
+            "zgl":         round(zgl, 1),
+            "spot_vs_zgl": dist_pct,   # + = above ZGL (stable), − = below (volatile)
+            "above_zgl":   above_zgl,
+        }
+    except Exception as e:
+        logger.debug("_compute_zero_gamma_level error: {}", e)
+        return {"zgl": None, "spot_vs_zgl": None, "above_zgl": None}
+
+
+def _compute_gex_momentum(
+    conn:       duckdb.DuckDBPyConnection,
+    trade_date: str,
+    snap_time:  str,
+    underlying: str,
+) -> dict:
+    """GEX-6: GEX momentum vs trailing N-snap average.
+
+    At 1-min cadence, N = GEX_MOMENTUM_SNAPS (default 5) = 5-minute window.
+    Compares current snap GEX to the average of the prior N snaps.
+
+    gex_momentum_B:    current GEX minus trailing avg (₹ Billions).
+                       Positive = GEX building. Negative = GEX fading.
+    momentum_direction: "BUILDING" / "FADING" / "FLAT"
+                        FLAT when |change| < 5% of current |GEX|.
+    """
+    try:
+        n = settings.GEX_MOMENTUM_SNAPS
+        # Fetch last (n+1) snaps ordered desc: index 0 = current, rest = prior
+        rows = conn.execute("""
+            SELECT snap_time, SUM(gex) / ? AS gex_B
+            FROM options_data
+            WHERE trade_date = ? AND underlying = ? AND snap_time <= ?
+            GROUP BY snap_time
+            ORDER BY snap_time DESC
+            LIMIT ?
+        """, [settings.GEX_SCALING, trade_date, underlying, snap_time, n + 1]).fetchall()
+
+        if not rows:
+            return {"gex_momentum_B": None, "momentum_direction": None}
+
+        current_gex = rows[0][1] or 0.0
+        prior_snaps = [r[1] or 0.0 for r in rows[1:]]
+
+        if not prior_snaps:
+            return {"gex_momentum_B": None, "momentum_direction": None}
+
+        trailing_avg = sum(prior_snaps) / len(prior_snaps)
+        momentum     = current_gex - trailing_avg
+
+        # FLAT if change is < 5% of the magnitude of current GEX
+        flat_threshold = abs(current_gex) * 0.05
+        if abs(momentum) < flat_threshold or abs(momentum) < 0.001:
+            direction = "FLAT"
+        elif momentum > 0:
+            direction = "BUILDING"
+        else:
+            direction = "FADING"
+
+        return {
+            "gex_momentum_B":    round(momentum, 3),
+            "momentum_direction": direction,
+        }
+    except Exception as e:
+        logger.debug("_compute_gex_momentum error: {}", e)
+        return {"gex_momentum_B": None, "momentum_direction": None}

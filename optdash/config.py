@@ -45,7 +45,7 @@ class Settings(BaseSettings):
         return v
 
     # -- Scheduler
-    SCHEDULER_INTERVAL_SECONDS: int = 300  # 5-min tick
+    SCHEDULER_INTERVAL_SECONDS: int = 60   # 1-min tick (matches upxtx feed cadence)
     WS_INTERVAL_SECONDS:        int = 5    # WebSocket push cadence
 
     # M-5: WS_INTERVAL_SECONDS must be:
@@ -206,13 +206,17 @@ class Settings(BaseSettings):
 
     # ── BigQuery connection ────────────────────────────────────────────────────
     # BQ_TABLE_ARCHIVE (upxtx_ar): full historical archive → used by backfill.
-    # BQ_TABLE_LIVE    (upxtx):    rolling live feed      → used by gap fill + incremental.
+    # BQ_TABLE_LIVE    (upxtx):    rolling live feed (OPTIDX + FUTIDX + FUTSTK)
+    #                              → used by gap fill + incremental.
+    # BQ_TABLE_VIX     (upxtx_vix): India VIX + 30 index values (1-min feed)
+    #                              → side-pull for VIX watermark.
     # upxtx is synced to upxtx_ar at 06:35 IST daily; upxtx then becomes empty
     # until NSE market opens at 09:15 IST.
     BQ_PROJECT:          str  = "universal-ion-437606-b7"
     BQ_DATASET:          str  = "bgquery"
     BQ_TABLE_ARCHIVE:    str  = "upxtx_ar"
     BQ_TABLE_LIVE:       str  = "upxtx"
+    BQ_TABLE_VIX:        str  = "upxtx_vix"
     BQ_CREDENTIALS_PATH: Path = Path("service-account.json")
 
     # ── Pipeline / Watermark ──────────────────────────────────────────────────
@@ -254,11 +258,11 @@ class Settings(BaseSettings):
     # BQ columns fetched in every pull. processor.py maps these to PARQUET_SCHEMA.
     #
     # Excluded intentionally:
-    #   close_price     — yesterday's settlement price; wrong as ltp fallback.
-    #   last_trade_time — not needed by any analytics module.
-    #   open/high/low   — not in PARQUET_SCHEMA; not used by any gate/screener.
-    #   pcr             — computed from OI sums by pcr.py; not stored raw.
-    #   rho             — not provided by Upstox API.
+    #   close_price        — yesterday's settlement price; wrong as ltp fallback.
+    #   last_trade_time    — not needed by any analytics module.
+    #   high/low           — not used by any gate/screener (open kept for intrabar ref).
+    #   pcr                — computed from OI sums by pcr.py; not stored raw.
+    #   rho                — not provided by Upstox API.
     BQ_SELECT_COLS: list[str] = [
         "record_time",
         "underlying",
@@ -268,12 +272,27 @@ class Settings(BaseSettings):
         "expiry_date",        # M/D/YYYY in BQ → normalised to YYYY-MM-DD by processor
         "strike_price",
         "underlying_spot",    # → spot column in Parquet
+        "open",               # intrabar open — stored as-is for future OHLC analytics
         "close",              # intraday running close → effective_ltp fallback (not close_price)
         "ltp",                # primary price
         "volume",
         "oi",
         "total_buy_qty",      # → bid_qty (cumulative day buy flow)
         "total_sell_qty",     # → ask_qty (cumulative day sell flow)
+        # 5-level order book depth — bid side (L1 = best bid, L5 = deepest).
+        # qty/price are the primary analytics inputs; orders = number of orders at that level.
+        # NULL when fewer than N levels exist (illiquid / far-OTM strikes).
+        "depth_bid1_qty", "depth_bid1_price", "depth_bid1_orders",
+        "depth_bid2_qty", "depth_bid2_price", "depth_bid2_orders",
+        "depth_bid3_qty", "depth_bid3_price", "depth_bid3_orders",
+        "depth_bid4_qty", "depth_bid4_price", "depth_bid4_orders",
+        "depth_bid5_qty", "depth_bid5_price", "depth_bid5_orders",
+        # 5-level order book depth — ask side (L1 = best ask, L5 = deepest).
+        "depth_ask1_qty", "depth_ask1_price", "depth_ask1_orders",
+        "depth_ask2_qty", "depth_ask2_price", "depth_ask2_orders",
+        "depth_ask3_qty", "depth_ask3_price", "depth_ask3_orders",
+        "depth_ask4_qty", "depth_ask4_price", "depth_ask4_orders",
+        "depth_ask5_qty", "depth_ask5_price", "depth_ask5_orders",
         "iv",                 # percentage, e.g. 21.33 (NOT decimal 0.2133)
         "delta",
         "theta",
@@ -285,6 +304,7 @@ class Settings(BaseSettings):
     GEX_NEAR_WEEKS:        int   = 2
     GEX_DECLINE_THRESHOLD: float = 0.70  # 70% of peak -> declining
     GEX_SCALING:           float = 1e9   # raw / 1B -> display in Rs B
+    GEX_MOMENTUM_SNAPS:    int   = 5     # trailing avg window (snaps); 5 snaps = 5 min at 1-min cadence
 
     # -- CoC / V_CoC
     VCOC_BULL_THRESHOLD:     float = 10.0
@@ -484,6 +504,11 @@ class Settings(BaseSettings):
     def BQ_FQN_LIVE(self) -> str:
         """Fully-qualified BQ table for rolling live feed (upxtx)."""
         return f"{self.BQ_PROJECT}.{self.BQ_DATASET}.{self.BQ_TABLE_LIVE}"
+
+    @property
+    def BQ_FQN_VIX(self) -> str:
+        """Fully-qualified BQ table for VIX + index feed (upxtx_vix)."""
+        return f"{self.BQ_PROJECT}.{self.BQ_DATASET}.{self.BQ_TABLE_VIX}"
 
 
 settings = Settings()

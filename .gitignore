@@ -51,3 +51,8 @@ frontend/.env
 *.ipynb
 
 universal-ion-437606-b7-5629bd4bc421.json
+
+# Test files and Snapshots
+*.jsonl
+tes.txt
+data/vix/

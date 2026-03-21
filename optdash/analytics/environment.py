@@ -59,11 +59,15 @@ def get_environment_score(
 
         conditions: dict[str, dict] = {}
 
-        # C1: GEX declining (1 pt)
-        c1_met = gex_pct <= settings.GEX_DECLINE_THRESHOLD * 100
+        # C1: GEX declining — use regime_near (TIER1+TIER2 only) as primary signal.
+        # GEX-3: TIER3 (monthly/quarterly) OI dilutes gex_all near expiry.
+        # regime_near reflects the intraday dealer positioning correctly.
+        # Falls back to gex_pct (all-inclusive) when regime_near is absent.
+        gex_pct_near = gex_data.get("pct_near_of_peak", gex_pct)
+        c1_met = gex_pct_near <= settings.GEX_DECLINE_THRESHOLD * 100
         conditions["gex_declining"] = {
-            "met": c1_met, "value": round(gex_pct, 1),
-            "points": 1, "note": f"{gex_pct:.0f}% of day peak"
+            "met": c1_met, "value": round(gex_pct_near, 1),
+            "points": 1, "note": f"{gex_pct_near:.0f}% of peak (near-expiry GEX)"
         }
 
         # C2: V_CoC velocity (1 pt)

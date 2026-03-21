@@ -1,6 +1,6 @@
 """Parquet writer -- 1 file per underlying per calendar day.
 
-Each 5-minute scheduler tick calls write_snap() for every underlying.
+Each 1-minute scheduler tick calls write_snap() for every underlying.
 Because Parquet does not support native append, the writer uses a
 read-merge-rewrite pattern:
 
@@ -42,7 +42,7 @@ well within the 5-minute scheduler tick budget.
 
 Schema enforcement (W-1)
 ------------------------
-PARQUET_SCHEMA declares explicit dtypes for all 23 analytics columns.
+PARQUET_SCHEMA declares explicit dtypes for all 28 analytics columns.
 Passing it to pa.Table.from_pandas() prevents pandas dtype inference
 from producing int32/float32 columns on snaps where certain rows are
 absent (e.g. no futures rows -> Greeks inferred as int64 instead of
@@ -55,9 +55,13 @@ Column notes
 - option_type: nullable=True because FUT rows have no option_type (NULL).
   Previously nullable=False caused ArrowInvalid crash on every futures write.
 - bid_qty / ask_qty: mapped from BQ total_buy_qty / total_sell_qty.
-  Required by coc.py get_atm_obi(), get_futures_obi() and pcr.py
-  _smoothed_obi(). Without these columns OBI is silently 0 and Gates C3/C6
-  never fire.
+  Cumulative day buy/sell flow totals.  Required by coc.py get_atm_obi(),
+  get_futures_obi() and pcr.py _smoothed_obi().
+- bid1_qty / bid1_price: live L1 best-bid from depth_bid1_qty/price.
+  Instantaneous order book state. NULL when order book side is empty.
+- ask1_qty / ask1_price: live L1 best-ask from depth_ask1_qty/price.
+  Analytics upgrades (coc.py / pcr.py) will use these for true-OBI.
+- open: intrabar open price. NULL when absent in older BQ backfill data.
 - vex / cex: Vanna Exposure and Charm Exposure, computed by processor.py.
   Required by vex_cex.py analytics.
 - s_score: REMOVED. Computed live by screener.py -- must never be stored
@@ -107,6 +111,7 @@ PARQUET_SCHEMA = pa.schema([
     pa.field("option_type",     pa.string(),  nullable=True),   # NULL for FUT rows
     pa.field("instrument_type", pa.string(),  nullable=True),
     pa.field("ltp",             pa.float64(), nullable=True),
+    pa.field("open",            pa.float64(), nullable=True),   # intrabar open
     pa.field("iv",              pa.float64(), nullable=True),
     pa.field("delta",           pa.float64(), nullable=True),
     pa.field("theta",           pa.float64(), nullable=True),
@@ -116,8 +121,42 @@ PARQUET_SCHEMA = pa.schema([
     pa.field("fut_price",       pa.float64(), nullable=True),
     pa.field("oi",              pa.int64(),   nullable=True),
     pa.field("volume",          pa.int64(),   nullable=True),
-    pa.field("bid_qty",         pa.int64(),   nullable=True),   # from total_buy_qty
-    pa.field("ask_qty",         pa.int64(),   nullable=True),   # from total_sell_qty
+    pa.field("bid_qty",         pa.int64(),   nullable=True),   # cumulative day buy flow
+    pa.field("ask_qty",         pa.int64(),   nullable=True),   # cumulative day sell flow
+    # 5-level bid depth — L1 = best bid, L5 = deepest.
+    # qty/orders: int64 (lot counts); price: float64.
+    # NULL when fewer than N levels exist (illiquid / far-OTM strikes).
+    pa.field("bid1_qty",        pa.int64(),   nullable=True),
+    pa.field("bid1_price",      pa.float64(), nullable=True),
+    pa.field("bid1_orders",     pa.int64(),   nullable=True),
+    pa.field("bid2_qty",        pa.int64(),   nullable=True),
+    pa.field("bid2_price",      pa.float64(), nullable=True),
+    pa.field("bid2_orders",     pa.int64(),   nullable=True),
+    pa.field("bid3_qty",        pa.int64(),   nullable=True),
+    pa.field("bid3_price",      pa.float64(), nullable=True),
+    pa.field("bid3_orders",     pa.int64(),   nullable=True),
+    pa.field("bid4_qty",        pa.int64(),   nullable=True),
+    pa.field("bid4_price",      pa.float64(), nullable=True),
+    pa.field("bid4_orders",     pa.int64(),   nullable=True),
+    pa.field("bid5_qty",        pa.int64(),   nullable=True),
+    pa.field("bid5_price",      pa.float64(), nullable=True),
+    pa.field("bid5_orders",     pa.int64(),   nullable=True),
+    # 5-level ask depth — L1 = best ask, L5 = deepest.
+    pa.field("ask1_qty",        pa.int64(),   nullable=True),
+    pa.field("ask1_price",      pa.float64(), nullable=True),
+    pa.field("ask1_orders",     pa.int64(),   nullable=True),
+    pa.field("ask2_qty",        pa.int64(),   nullable=True),
+    pa.field("ask2_price",      pa.float64(), nullable=True),
+    pa.field("ask2_orders",     pa.int64(),   nullable=True),
+    pa.field("ask3_qty",        pa.int64(),   nullable=True),
+    pa.field("ask3_price",      pa.float64(), nullable=True),
+    pa.field("ask3_orders",     pa.int64(),   nullable=True),
+    pa.field("ask4_qty",        pa.int64(),   nullable=True),
+    pa.field("ask4_price",      pa.float64(), nullable=True),
+    pa.field("ask4_orders",     pa.int64(),   nullable=True),
+    pa.field("ask5_qty",        pa.int64(),   nullable=True),
+    pa.field("ask5_price",      pa.float64(), nullable=True),
+    pa.field("ask5_orders",     pa.int64(),   nullable=True),
     pa.field("gex",             pa.float64(), nullable=True),
     pa.field("vex",             pa.float64(), nullable=True),   # Vanna Exposure
     pa.field("cex",             pa.float64(), nullable=True),   # Charm Exposure
