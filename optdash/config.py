@@ -391,6 +391,12 @@ class Settings(BaseSettings):
     # At 1-min cadence: 3 snaps = 3-min trend window.
     PCR_TREND_SNAPS: int = 3
 
+    # PCR smoothed_obi trailing window (snaps).
+    # At 1-min cadence: 10 snaps = 10-min smoothing (was 3-snap/15-min at 5-min cadence).
+    # Increasing this smooths out single-strike L1 depth noise at the cost of
+    # slightly delayed OBI reversals. 10 is a practical midpoint.
+    PCR_OBI_SMOOTH_SNAPS: int = 10
+
     # -- OBI
     OBI_THRESHOLD: float = 0.10
     # Futures OBI threshold for Gate Condition 3 (sellers dominant).

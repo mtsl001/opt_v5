@@ -50,7 +50,7 @@ def get_pcr(
         use_tier2 = (dte_t1 <= 1)
         primary_div  = div_t2 if use_tier2 else div_t1
         tier_used    = "TIER2" if use_tier2 else "TIER1"
-        obi          = _smoothed_obi(conn, trade_date, snap_time, underlying)
+        obi          = _smoothed_obi(conn, trade_date, snap_time, underlying, tier=tier_used)
 
         metrics = _trailing_pcr_metrics(conn, trade_date, snap_time, underlying, tier=tier_used)
         div_std = metrics["div_std"]
@@ -101,13 +101,14 @@ def get_pcr_series(
     try:
         w_z = settings.PCR_ZSCORE_WINDOW - 1
         w_t = settings.PCR_TREND_SNAPS
+        w_obi = settings.PCR_OBI_SMOOTH_SNAPS - 1
         rows = conn.execute(f"""
             SELECT
                 snap_time,
                 pcr_vol_t1, pcr_oi_t1, ROUND(pcr_vol_t1 - pcr_oi_t1, 4) AS div_t1,
                 pcr_vol_t2, pcr_oi_t2, ROUND(pcr_vol_t2 - pcr_oi_t2, 4) AS div_t2,
                 dte_t1,
-                obi,
+                obi_t1, obi_t2,
                 AVG(pcr_vol_t1 - pcr_oi_t1) OVER (
                     ORDER BY snap_time
                     ROWS BETWEEN {w_z} PRECEDING AND CURRENT ROW
@@ -130,10 +131,14 @@ def get_pcr_series(
                 LAG(pcr_vol_t2 - pcr_oi_t2, {w_t}) OVER (
                     ORDER BY snap_time
                 ) AS div_lag_t2,
-                AVG(obi) OVER (
+                AVG(obi_t1) OVER (
                     ORDER BY snap_time
-                    ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
-                ) AS smoothed_obi
+                    ROWS BETWEEN {w_obi} PRECEDING AND CURRENT ROW
+                ) AS smoothed_obi_t1,
+                AVG(obi_t2) OVER (
+                    ORDER BY snap_time
+                    ROWS BETWEEN {w_obi} PRECEDING AND CURRENT ROW
+                ) AS smoothed_obi_t2
             FROM (
                 SELECT
                     snap_time,
@@ -146,8 +151,12 @@ def get_pcr_series(
                     SUM(CASE WHEN option_type='PE' AND expiry_tier='TIER2' THEN oi ELSE 0 END) /
                     NULLIF(SUM(CASE WHEN option_type='CE' AND expiry_tier='TIER2' THEN oi ELSE 0 END), 0)     AS pcr_oi_t2,
                     MIN(CASE WHEN expiry_tier='TIER1' THEN dte END)                                           AS dte_t1,
-                    (SUM(COALESCE(bid1_qty,0)) - SUM(COALESCE(ask1_qty,0))) /
-                    NULLIF(SUM(COALESCE(bid1_qty,0) + COALESCE(ask1_qty,0)), 0)                               AS obi
+                    (SUM(CASE WHEN expiry_tier='TIER1' THEN COALESCE(bid1_qty,0) ELSE 0 END) -
+                     SUM(CASE WHEN expiry_tier='TIER1' THEN COALESCE(ask1_qty,0) ELSE 0 END)) /
+                    NULLIF(SUM(CASE WHEN expiry_tier='TIER1' THEN COALESCE(bid1_qty,0)+COALESCE(ask1_qty,0) ELSE 0 END), 0) AS obi_t1,
+                    (SUM(CASE WHEN expiry_tier='TIER2' THEN COALESCE(bid1_qty,0) ELSE 0 END) -
+                     SUM(CASE WHEN expiry_tier='TIER2' THEN COALESCE(ask1_qty,0) ELSE 0 END)) /
+                    NULLIF(SUM(CASE WHEN expiry_tier='TIER2' THEN COALESCE(bid1_qty,0)+COALESCE(ask1_qty,0) ELSE 0 END), 0) AS obi_t2
                 FROM options_data
                 WHERE trade_date=? AND underlying=? AND expiry_tier IN ('TIER1', 'TIER2')
                 GROUP BY snap_time
@@ -171,7 +180,8 @@ def get_pcr_series(
             div_std_t2   = r[11] or 0.0
             div_lag_t1   = r[12]
             div_lag_t2   = r[13]
-            smoothed_obi = r[14] or 0.0
+            smoothed_obi_t1 = r[14] or 0.0
+            smoothed_obi_t2 = r[15] or 0.0
             
             use_tier2 = (dte_t1 <= 1)
             primary_div = div_t2 if use_tier2 else div_t1
@@ -180,6 +190,7 @@ def get_pcr_series(
             div_mean = div_mean_t2 if use_tier2 else div_mean_t1
             div_std  = div_std_t2 if use_tier2 else div_std_t1
             div_lag  = div_lag_t2 if use_tier2 else div_lag_t1
+            smoothed_obi = smoothed_obi_t2 if use_tier2 else smoothed_obi_t1
             
             z_score = round((primary_div - div_mean) / div_std, 3) if div_std > 0.001 else 0.0
             div_trend = round(primary_div - div_lag, 4) if div_lag is not None else 0.0
@@ -213,20 +224,28 @@ def _smoothed_obi(
     trade_date: str,
     snap_time:  str,
     underlying: str,
+    tier:       str = "TIER1",
 ) -> float:
-    """3-snap trailing average of OBI (15-min smoothing)."""
+    """Trailing average of per-snap L1 OBI over PCR_OBI_SMOOTH_SNAPS snaps.
+
+    Window: settings.PCR_OBI_SMOOTH_SNAPS (default 10 snaps = 10 min at 1-min cadence).
+    Source: bid1_qty/ask1_qty (instantaneous L1 depth, not cumulative day flow).
+    Tier: matches the primary PCR tier (TIER1 normally, TIER2 on expiry day).
+    COALESCE guards handle NULL depth on far-OTM/illiquid strikes.
+    """
     try:
+        limit = settings.PCR_OBI_SMOOTH_SNAPS
         rows = conn.execute("""
             SELECT
                 (SUM(COALESCE(bid1_qty,0)) - SUM(COALESCE(ask1_qty,0))) /
                 NULLIF(SUM(COALESCE(bid1_qty,0) + COALESCE(ask1_qty,0)), 0) AS obi
             FROM options_data
             WHERE trade_date=? AND underlying=? AND snap_time <= ?
-              AND expiry_tier='TIER1'
+              AND expiry_tier=?
             GROUP BY snap_time
             ORDER BY snap_time DESC
-            LIMIT 3
-        """, [trade_date, underlying, snap_time]).fetchall()
+            LIMIT ?
+        """, [trade_date, underlying, snap_time, tier, limit]).fetchall()
         if not rows:
             return 0.0
         return sum(r[0] or 0 for r in rows) / len(rows)
