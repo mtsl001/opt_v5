@@ -52,7 +52,7 @@ def get_pcr(
         tier_used    = "TIER2" if use_tier2 else "TIER1"
         obi          = _smoothed_obi(conn, trade_date, snap_time, underlying)
 
-        metrics = _trailing_pcr_metrics(conn, trade_date, snap_time, underlying)
+        metrics = _trailing_pcr_metrics(conn, trade_date, snap_time, underlying, tier=tier_used)
         div_std = metrics["div_std"]
         z_score = round((primary_div - metrics["div_mean"]) / div_std, 3) if div_std > 0.001 else 0.0
         
@@ -69,12 +69,12 @@ def get_pcr(
             "pcr_vol_t1":     round(pcr_vol_t1, 3),
             "pcr_oi_t1":      round(pcr_oi_t1, 3),
             "div_t1":         div_t1,
-            "signal_t1":      _pcr_signal_z(div_t1, z_score, metrics["count"], div_trend),
+            "signal_t1":      _pcr_signal(div_t1),
             # TIER2
             "pcr_vol_t2":     round(pcr_vol_t2, 3),
             "pcr_oi_t2":      round(pcr_oi_t2, 3),
             "div_t2":         div_t2,
-            "signal_t2":      _pcr_signal_z(div_t2, z_score, metrics["count"], div_trend),
+            "signal_t2":      _pcr_signal(div_t2),
             # Primary (what Gate C4 and frontend should use)
             "pcr_divergence": primary_div,        # backward-compatible key name kept
             "z_score":        z_score,
@@ -111,14 +111,25 @@ def get_pcr_series(
                 AVG(pcr_vol_t1 - pcr_oi_t1) OVER (
                     ORDER BY snap_time
                     ROWS BETWEEN {w_z} PRECEDING AND CURRENT ROW
-                ) AS div_mean,
+                ) AS div_mean_t1,
                 STDDEV_SAMP(pcr_vol_t1 - pcr_oi_t1) OVER (
                     ORDER BY snap_time
                     ROWS BETWEEN {w_z} PRECEDING AND CURRENT ROW
-                ) AS div_std,
+                ) AS div_std_t1,
+                AVG(pcr_vol_t2 - pcr_oi_t2) OVER (
+                    ORDER BY snap_time
+                    ROWS BETWEEN {w_z} PRECEDING AND CURRENT ROW
+                ) AS div_mean_t2,
+                STDDEV_SAMP(pcr_vol_t2 - pcr_oi_t2) OVER (
+                    ORDER BY snap_time
+                    ROWS BETWEEN {w_z} PRECEDING AND CURRENT ROW
+                ) AS div_std_t2,
                 LAG(pcr_vol_t1 - pcr_oi_t1, {w_t}) OVER (
                     ORDER BY snap_time
-                ) AS div_lag,
+                ) AS div_lag_t1,
+                LAG(pcr_vol_t2 - pcr_oi_t2, {w_t}) OVER (
+                    ORDER BY snap_time
+                ) AS div_lag_t2,
                 AVG(obi) OVER (
                     ORDER BY snap_time
                     ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
@@ -154,14 +165,21 @@ def get_pcr_series(
             div_t2     = r[6] or 0.0
             dte_t1     = int(r[7] or 99)
             
-            div_mean     = r[8] or 0.0
-            div_std      = r[9] or 0.0
-            div_lag      = r[10]
-            smoothed_obi = r[11] or 0.0
+            div_mean_t1  = r[8] or 0.0
+            div_std_t1   = r[9] or 0.0
+            div_mean_t2  = r[10] or 0.0
+            div_std_t2   = r[11] or 0.0
+            div_lag_t1   = r[12]
+            div_lag_t2   = r[13]
+            smoothed_obi = r[14] or 0.0
             
             use_tier2 = (dte_t1 <= 1)
             primary_div = div_t2 if use_tier2 else div_t1
             tier_used   = "TIER2" if use_tier2 else "TIER1"
+            
+            div_mean = div_mean_t2 if use_tier2 else div_mean_t1
+            div_std  = div_std_t2 if use_tier2 else div_std_t1
+            div_lag  = div_lag_t2 if use_tier2 else div_lag_t1
             
             z_score = round((primary_div - div_mean) / div_std, 3) if div_std > 0.001 else 0.0
             div_trend = round(primary_div - div_lag, 4) if div_lag is not None else 0.0
@@ -173,11 +191,11 @@ def get_pcr_series(
                 "pcr_vol_t1":     round(pcr_vol_t1, 3),
                 "pcr_oi_t1":      round(pcr_oi_t1, 3),
                 "div_t1":         div_t1,
-                "signal_t1":      _pcr_signal_z(div_t1, z_score, i + 1, div_trend),
+                "signal_t1":      _pcr_signal(div_t1),
                 "pcr_vol_t2":     round(pcr_vol_t2, 3),
                 "pcr_oi_t2":      round(pcr_oi_t2, 3),
                 "div_t2":         div_t2,
-                "signal_t2":      _pcr_signal_z(div_t2, z_score, i + 1, div_trend),
+                "signal_t2":      _pcr_signal(div_t2),
                 "pcr_divergence": primary_div,
                 "z_score":        z_score,
                 "div_trend":      div_trend,
@@ -216,7 +234,7 @@ def _smoothed_obi(
         return 0.0
 
 
-def _trailing_pcr_metrics(conn: duckdb.DuckDBPyConnection, trade_date: str, snap_time: str, underlying: str) -> dict:
+def _trailing_pcr_metrics(conn: duckdb.DuckDBPyConnection, trade_date: str, snap_time: str, underlying: str, tier: str = "TIER1") -> dict:
     """Compute rolling Z-score parameters and divergence trend for the latest snapshot."""
     try:
         limit_rows = max(settings.PCR_ZSCORE_WINDOW, settings.PCR_TREND_SNAPS + 1)
@@ -228,11 +246,11 @@ def _trailing_pcr_metrics(conn: duckdb.DuckDBPyConnection, trade_date: str, snap
                  NULLIF(SUM(CASE WHEN option_type='CE' THEN oi ELSE 0 END), 0)) AS div_t1
             FROM options_data
             WHERE trade_date=? AND underlying=? AND snap_time <= ?
-              AND expiry_tier='TIER1'
+              AND expiry_tier=?
             GROUP BY snap_time
             ORDER BY snap_time DESC
             LIMIT ?
-        """, [trade_date, underlying, snap_time, limit_rows]).fetchall()
+        """, [trade_date, underlying, snap_time, tier, limit_rows]).fetchall()
         
         if not rows:
             return {"div_mean": 0.0, "div_std": 0.0, "div_lag": None, "count": 0}
@@ -281,3 +299,13 @@ def _pcr_signal_z(div: float, z: float, snap_count: int, div_trend: float) -> st
         signal = "DIVERGENCE_FADING"
         
     return signal
+
+def _pcr_signal(div: float) -> str:
+    """Provide absolute threshold signal when Z-score is not applicable."""
+    if div > settings.PCR_DIV_BULL_THRESHOLD:
+        return "RETAIL_PANIC_PUTS"
+    if div < settings.PCR_DIV_BEAR_THRESHOLD:
+        return "RETAIL_PANIC_CALLS"
+    if abs(div) > 0.10:
+        return "DIVERGENCE_BUILDING"
+    return "BALANCED"
