@@ -107,14 +107,26 @@ def get_environment_score(
             "points": 1, "note": f"{pcr_tier} Divergence = {pcr_div:+.4f}"
         }
 
-        # C5: IV cheap (IVP < 50) (1 pt)
-        # Guard: use explicit None check so IVP=0 (historically cheapest IV)
-        # is treated as valid (met=True) rather than coerced to 100 via `or`.
-        ivp_val = ivp if ivp is not None else 100.0
-        c5_met  = ivp_val < 50
+        # C5: IV cheap — threshold tightens when India VIX is elevated (1 pt)
+        # When VIX_HIGH_THRESHOLD is breached, require IVP < VIX_HIGH_IVP_THRESHOLD
+        # (default 35) instead of the normal < 50. This prevents "IV cheap" signal
+        # from firing in high-fear regimes where IV can spike further intraday.
+        india_vix  = iv_data.get("india_vix")
+        vix_regime = iv_data.get("vix_regime", "UNKNOWN")
+        ivp_val    = ivp if ivp is not None else 100.0
+
+        if vix_regime == "HIGH":
+            c5_threshold = settings.VIX_HIGH_IVP_THRESHOLD   # 35 when VIX elevated
+            c5_note_suffix = f" | VIX={india_vix:.1f} HIGH → threshold={c5_threshold}"
+        else:
+            c5_threshold   = 50.0
+            c5_note_suffix = f" | VIX={'N/A' if india_vix is None else f'{india_vix:.1f}'}"
+
+        c5_met = ivp_val < c5_threshold
         conditions["ivp_cheap"] = {
             "met": c5_met, "value": round(ivp_val, 1),
-            "points": 1, "note": f"IVP = {ivp_val:.0f}th pct"
+            "points": 1,
+            "note": f"IVP = {ivp_val:.0f}th pct{c5_note_suffix}"
         }
 
         # C6: ATM OBI significant (1 pt)

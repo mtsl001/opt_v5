@@ -418,6 +418,7 @@ class Settings(BaseSettings):
 
     # -- India VIX (new section)
     VIX_HIGH_THRESHOLD:      float = 20.0   # IV-6: VIX above this = HIGH regime
+    VIX_HIGH_IVP_THRESHOLD:  float = 35.0   # IV-6b: IVP threshold when VIX is HIGH
     # IV crush HIGH severity Vega threshold -- per underlying.
     # Unit: option price points per 1% IV change (confirmed from screener
     # normalisation: vega / ltp / 0.50). NOT raw BSM decimal Vega.
