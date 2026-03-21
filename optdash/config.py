@@ -413,6 +413,8 @@ class Settings(BaseSettings):
     IVR_HIGH_PERCENTILE:     float = 0.99   # IV-2: 99th percentile for IVR high anchor
     TS_CONTANGO_SLOPE:       float =  0.30  # IV-3: annualized IV units per √day
     TS_BACKWARDATION_SLOPE:  float = -0.30
+    VRP_OVERPRICED_THRESHOLD: float =  2.0   # IV-4: IV exceeds HV20 by 2 pts → sellers favored
+    VRP_UNDERPRICED_THRESHOLD: float =  0.0   # IV-4: IV below HV20 → buyers favored
     # IV crush HIGH severity Vega threshold -- per underlying.
     # Unit: option price points per 1% IV change (confirmed from screener
     # normalisation: vega / ltp / 0.50). NOT raw BSM decimal Vega.

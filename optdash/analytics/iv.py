@@ -138,6 +138,15 @@ def get_ivr_ivp(
         """, [underlying, trade_date]).fetchone()
         hv20 = round(hv20_row[0], 1) if hv20_row and hv20_row[0] else None
 
+        vrp = round(atm_iv - hv20, 2) if hv20 is not None else None
+
+        vrp_regime = (
+            "OVERPRICED"  if vrp is not None and vrp >  settings.VRP_OVERPRICED_THRESHOLD  else
+            "UNDERPRICED" if vrp is not None and vrp <  settings.VRP_UNDERPRICED_THRESHOLD else
+            "FAIR"        if vrp is not None else
+            "UNKNOWN"
+        )
+
         return {
             "atm_iv":       round(atm_iv, 2),
             "ivr":          ivr,
@@ -146,7 +155,9 @@ def get_ivr_ivp(
             "iv_high":      round(iv_high, 2),
             "iv_median":    round(iv_median, 2),
             "hv20":         hv20,
-            "iv_hv_spread": round(atm_iv - (hv20 or atm_iv), 2),
+            "vrp":          vrp,
+            "iv_hv_spread": vrp,        # backward-compat alias — keeps frontend working
+            "vrp_regime":   vrp_regime,
             "shape":        get_term_structure(
                                 conn, trade_date, snap_time, underlying
                             ).get("shape", "FLAT"),
