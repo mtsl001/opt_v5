@@ -15,27 +15,61 @@ def get_pcr(
     try:
         row = conn.execute("""
             SELECT
-                SUM(CASE WHEN option_type='PE' THEN volume ELSE 0 END) /
-                NULLIF(SUM(CASE WHEN option_type='CE' THEN volume ELSE 0 END), 0) AS pcr_vol,
-                SUM(CASE WHEN option_type='PE' THEN oi ELSE 0 END) /
-                NULLIF(SUM(CASE WHEN option_type='CE' THEN oi ELSE 0 END), 0)     AS pcr_oi
+                -- TIER1 aggregates
+                SUM(CASE WHEN option_type='PE' AND expiry_tier='TIER1' THEN volume ELSE 0 END) /
+                NULLIF(SUM(CASE WHEN option_type='CE' AND expiry_tier='TIER1' THEN volume ELSE 0 END), 0) AS pcr_vol_t1,
+
+                SUM(CASE WHEN option_type='PE' AND expiry_tier='TIER1' THEN oi ELSE 0 END) /
+                NULLIF(SUM(CASE WHEN option_type='CE' AND expiry_tier='TIER1' THEN oi ELSE 0 END), 0)     AS pcr_oi_t1,
+
+                -- TIER2 aggregates
+                SUM(CASE WHEN option_type='PE' AND expiry_tier='TIER2' THEN volume ELSE 0 END) /
+                NULLIF(SUM(CASE WHEN option_type='CE' AND expiry_tier='TIER2' THEN volume ELSE 0 END), 0) AS pcr_vol_t2,
+
+                SUM(CASE WHEN option_type='PE' AND expiry_tier='TIER2' THEN oi ELSE 0 END) /
+                NULLIF(SUM(CASE WHEN option_type='CE' AND expiry_tier='TIER2' THEN oi ELSE 0 END), 0)     AS pcr_oi_t2,
+
+                -- DTE for tier-selection logic (min DTE of TIER1 = near-expiry contract)
+                MIN(CASE WHEN expiry_tier='TIER1' THEN dte END)                                           AS dte_t1
+
             FROM options_data
             WHERE trade_date=? AND snap_time=? AND underlying=?
-              AND expiry_tier='TIER1'
+              AND expiry_tier IN ('TIER1', 'TIER2')
         """, [trade_date, snap_time, underlying]).fetchone()
+        
         if not row:
             return {}
-        pcr_vol = row[0] or 1.0
-        pcr_oi  = row[1] or 1.0
-        div     = round(pcr_vol - pcr_oi, 4)
-        obi     = _smoothed_obi(conn, trade_date, snap_time, underlying)
+            
+        pcr_vol_t1, pcr_oi_t1 = row[0] or 1.0, row[1] or 1.0
+        pcr_vol_t2, pcr_oi_t2 = row[2] or 1.0, row[3] or 1.0
+        dte_t1 = int(row[4] or 99)
+        div_t1 = round(pcr_vol_t1 - pcr_oi_t1, 4)
+        div_t2 = round(pcr_vol_t2 - pcr_oi_t2, 4)
+
+        # Primary tier selection — annotated, never silent
+        use_tier2 = (dte_t1 <= 1)
+        primary_div  = div_t2 if use_tier2 else div_t1
+        tier_used    = "TIER2" if use_tier2 else "TIER1"
+        obi          = _smoothed_obi(conn, trade_date, snap_time, underlying)
+
         return {
-            "snap_time":    snap_time,
-            "pcr_vol":      round(pcr_vol, 3),
-            "pcr_oi":       round(pcr_oi, 3),
-            "pcr_divergence": div,
-            "smoothed_obi": round(obi, 4),
-            "signal":       _pcr_signal(div),
+            "snap_time":      snap_time,
+            "dte_t1":         dte_t1,
+            "tier_used":      tier_used,          # explicit — never hidden
+            # TIER1
+            "pcr_vol_t1":     round(pcr_vol_t1, 3),
+            "pcr_oi_t1":      round(pcr_oi_t1, 3),
+            "div_t1":         div_t1,
+            "signal_t1":      _pcr_signal(div_t1),
+            # TIER2
+            "pcr_vol_t2":     round(pcr_vol_t2, 3),
+            "pcr_oi_t2":      round(pcr_oi_t2, 3),
+            "div_t2":         div_t2,
+            "signal_t2":      _pcr_signal(div_t2),
+            # Primary (what Gate C4 and frontend should use)
+            "pcr_divergence": primary_div,        # backward-compatible key name kept
+            "signal":         _pcr_signal(primary_div),
+            "smoothed_obi":   round(obi, 4),
         }
     except Exception as e:
         record_error("get_pcr")
@@ -57,8 +91,10 @@ def get_pcr_series(
         rows = conn.execute("""
             SELECT
                 snap_time,
-                pcr_vol,
-                pcr_oi,
+                pcr_vol_t1, pcr_oi_t1, ROUND(pcr_vol_t1 - pcr_oi_t1, 4) AS div_t1,
+                pcr_vol_t2, pcr_oi_t2, ROUND(pcr_vol_t2 - pcr_oi_t2, 4) AS div_t2,
+                dte_t1,
+                obi,
                 AVG(obi) OVER (
                     ORDER BY snap_time
                     ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
@@ -66,14 +102,19 @@ def get_pcr_series(
             FROM (
                 SELECT
                     snap_time,
-                    SUM(CASE WHEN option_type='PE' THEN volume ELSE 0 END) /
-                    NULLIF(SUM(CASE WHEN option_type='CE' THEN volume ELSE 0 END), 0) AS pcr_vol,
-                    SUM(CASE WHEN option_type='PE' THEN oi ELSE 0 END) /
-                    NULLIF(SUM(CASE WHEN option_type='CE' THEN oi ELSE 0 END), 0)     AS pcr_oi,
-                    (SUM(bid_qty) - SUM(ask_qty)) /
-                    NULLIF(SUM(bid_qty + ask_qty), 0)                                 AS obi
+                    SUM(CASE WHEN option_type='PE' AND expiry_tier='TIER1' THEN volume ELSE 0 END) /
+                    NULLIF(SUM(CASE WHEN option_type='CE' AND expiry_tier='TIER1' THEN volume ELSE 0 END), 0) AS pcr_vol_t1,
+                    SUM(CASE WHEN option_type='PE' AND expiry_tier='TIER1' THEN oi ELSE 0 END) /
+                    NULLIF(SUM(CASE WHEN option_type='CE' AND expiry_tier='TIER1' THEN oi ELSE 0 END), 0)     AS pcr_oi_t1,
+                    SUM(CASE WHEN option_type='PE' AND expiry_tier='TIER2' THEN volume ELSE 0 END) /
+                    NULLIF(SUM(CASE WHEN option_type='CE' AND expiry_tier='TIER2' THEN volume ELSE 0 END), 0) AS pcr_vol_t2,
+                    SUM(CASE WHEN option_type='PE' AND expiry_tier='TIER2' THEN oi ELSE 0 END) /
+                    NULLIF(SUM(CASE WHEN option_type='CE' AND expiry_tier='TIER2' THEN oi ELSE 0 END), 0)     AS pcr_oi_t2,
+                    MIN(CASE WHEN expiry_tier='TIER1' THEN dte END)                                           AS dte_t1,
+                    (SUM(COALESCE(bid1_qty,0)) - SUM(COALESCE(ask1_qty,0))) /
+                    NULLIF(SUM(COALESCE(bid1_qty,0) + COALESCE(ask1_qty,0)), 0)                               AS obi
                 FROM options_data
-                WHERE trade_date=? AND underlying=? AND expiry_tier='TIER1'
+                WHERE trade_date=? AND underlying=? AND expiry_tier IN ('TIER1', 'TIER2')
                 GROUP BY snap_time
             ) sub
             ORDER BY snap_time
@@ -81,16 +122,33 @@ def get_pcr_series(
 
         result = []
         for r in rows:
-            pcr_vol = r[1] or 1.0
-            pcr_oi  = r[2] or 1.0
-            div     = round(pcr_vol - pcr_oi, 4)
+            pcr_vol_t1 = r[1] or 1.0
+            pcr_oi_t1  = r[2] or 1.0
+            div_t1     = r[3] or 0.0
+            pcr_vol_t2 = r[4] or 1.0
+            pcr_oi_t2  = r[5] or 1.0
+            div_t2     = r[6] or 0.0
+            dte_t1     = int(r[7] or 99)
+            
+            use_tier2 = (dte_t1 <= 1)
+            primary_div = div_t2 if use_tier2 else div_t1
+            tier_used   = "TIER2" if use_tier2 else "TIER1"
+            
             result.append({
                 "snap_time":      r[0],
-                "pcr_vol":        round(pcr_vol, 3),
-                "pcr_oi":         round(pcr_oi, 3),
-                "pcr_divergence": div,
-                "smoothed_obi":   round(r[3] or 0.0, 4),
-                "signal":         _pcr_signal(div),
+                "dte_t1":         dte_t1,
+                "tier_used":      tier_used,
+                "pcr_vol_t1":     round(pcr_vol_t1, 3),
+                "pcr_oi_t1":      round(pcr_oi_t1, 3),
+                "div_t1":         div_t1,
+                "signal_t1":      _pcr_signal(div_t1),
+                "pcr_vol_t2":     round(pcr_vol_t2, 3),
+                "pcr_oi_t2":      round(pcr_oi_t2, 3),
+                "div_t2":         div_t2,
+                "signal_t2":      _pcr_signal(div_t2),
+                "pcr_divergence": primary_div,
+                "signal":         _pcr_signal(primary_div),
+                "smoothed_obi":   round(r[9] or 0.0, 4),
             })
         return result
     except Exception as e:
@@ -108,8 +166,8 @@ def _smoothed_obi(
     try:
         rows = conn.execute("""
             SELECT
-                (SUM(bid_qty) - SUM(ask_qty)) /
-                NULLIF(SUM(bid_qty + ask_qty), 0) AS obi
+                (SUM(COALESCE(bid1_qty,0)) - SUM(COALESCE(ask1_qty,0))) /
+                NULLIF(SUM(COALESCE(bid1_qty,0) + COALESCE(ask1_qty,0)), 0) AS obi
             FROM options_data
             WHERE trade_date=? AND underlying=? AND snap_time <= ?
               AND expiry_tier='TIER1'
