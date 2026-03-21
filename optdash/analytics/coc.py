@@ -83,6 +83,9 @@ def get_atm_obi(conn: duckdb.DuckDBPyConnection, trade_date: str,
     Parquet rows exist per option at that strike. Previously LIMIT 4 could
     return 3 CE + 1 PE (or 4 CE + 0 PE) when spot sat on a strike boundary
     or when one option type had more rows than the other, skewing OBI.
+
+    CoC-3: uses bid1_qty/ask1_qty (L1 live depth) instead of bid_qty/ask_qty
+    (cumulative day totals). COALESCE guards handle NULL on illiquid strikes.
     """
     try:
         row = conn.execute("""
@@ -123,7 +126,11 @@ def get_atm_obi(conn: duckdb.DuckDBPyConnection, trade_date: str,
 
 def get_futures_obi(conn: duckdb.DuckDBPyConnection, trade_date: str,
                     snap_time: str, underlying: str) -> float:
-    """Futures order book imbalance."""
+    """Futures order book imbalance.
+
+    CoC-3: uses bid1_qty/ask1_qty (L1 live depth) instead of bid_qty/ask_qty
+    (cumulative day totals). COALESCE guards handle NULL on illiquid strikes.
+    """
     try:
         row = conn.execute("""
             SELECT
