@@ -7,11 +7,30 @@ for live order book pressure. bid1_qty/ask1_qty reflect the resting queue
 at the best bid/ask right now. COALESCE guards handle NULL depth on
 illiquid/far-OTM strikes.
 """
+import math
 import duckdb
 from loguru import logger
 from optdash.config import settings
 from optdash.metrics import record_error
 
+
+def _fair_value_coc(spot: float, fut_price: float, dte: int, underlying: str) -> dict:
+    """Compute fair-value futures price and deviation from it.
+
+    F* = S * exp((r - q) * t/365)
+    coc_fv_premium = actual_future - F*
+
+    A positive value = futures trade above fair value (institutional bullish pressure).
+    Near zero = futures trade at fair value (neutral, carry only).
+    Negative = structural discount beyond what dividends explain (genuine bearish signal).
+    """
+    r  = settings.RISK_FREE_RATE
+    q  = settings.DIVIDEND_YIELD.get(underlying, 0.01)
+    fv = spot * math.exp((r - q) * (max(dte, 1) / 365))
+    return {
+        "fair_value":      round(fv, 2),
+        "coc_fv_premium":  round(fut_price - fv, 2),
+    }
 
 def get_coc_latest(conn: duckdb.DuckDBPyConnection, trade_date: str,
                    snap_time: str, underlying: str) -> dict:
@@ -39,13 +58,15 @@ def get_coc_latest(conn: duckdb.DuckDBPyConnection, trade_date: str,
         coc_pct = round((coc / spot) * (365 / max(dte, 1)) * 100, 4)
         vcoc_pct = round((vcoc / spot) * (365 / max(dte, 1)) * 100, 4)
         
-        signal = _coc_signal(coc, vcoc, spot, dte)
+        fv_data = _fair_value_coc(spot, row[1], int(dte), underlying)
+        signal = _coc_signal(coc, vcoc, spot, dte, fv_data["coc_fv_premium"])
         
         return {
             "snap_time": row[0], "fut_price": row[1], "spot": row[2],
             "coc": round(coc, 2), "v_coc_15m": round(vcoc, 2),
             "coc_pct": coc_pct, "vcoc_pct": vcoc_pct, "dte": int(dte),
             "signal": signal,
+            **fv_data
         }
     except Exception as e:
         record_error("get_coc_latest")
@@ -220,7 +241,7 @@ def _compute_vcoc_from_series(rows: list, i: int) -> float:
     return round((rows[i][1] or 0) - (rows[i - lookback][1] or 0), 2)
 
 
-def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = 30) -> str:
+def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = 30, coc_fv_premium: float = None) -> str:
     if spot > 0 and dte > 0:
         vcoc_pct = (vcoc / spot) * (365 / dte) * 100
         coc_pct  = (coc  / spot) * (365 / dte) * 100
@@ -228,7 +249,10 @@ def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = 30) -> str:
             return "VELOCITY_BULL"
         if vcoc_pct < settings.VCOC_BEAR_THRESHOLD_PCT:
             return "VELOCITY_BEAR"
-        if coc_pct  < settings.COC_DISCOUNT_THRESHOLD_PCT:
+        
+        # DISCOUNT: use fair-value-adjusted premium if available, else raw coc_pct
+        discount_val = coc_fv_premium if coc_fv_premium is not None else coc_pct
+        if discount_val  < settings.COC_DISCOUNT_THRESHOLD_PCT:
             return "DISCOUNT"
         return "NORMAL"
     # Fallback to absolute thresholds when spot/dte unavailable
