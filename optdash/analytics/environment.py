@@ -96,6 +96,7 @@ def get_environment_score(
             "note": f"Fut OBI = {fut_bs:.3f} (bear<{fut_obi_bear:.2f} | bull>{fut_obi_bull:.2f})"
         }
 
+        pcr_tier  = pcr_data.get("tier_used", "TIER1")
         # C4: PCR divergence (1 pt)
         # Issue-6: use config thresholds (same as direction.py Signal 5) instead
         # of the hardcoded 0.15.  This ensures tuning PCR_DIV_*_THRESHOLD in
@@ -103,7 +104,7 @@ def get_environment_score(
         c4_met = pcr_div > settings.PCR_DIV_BULL_THRESHOLD or pcr_div < settings.PCR_DIV_BEAR_THRESHOLD
         conditions["pcr_divergence"] = {
             "met": c4_met, "value": round(pcr_div, 4),
-            "points": 1, "note": f"Divergence = {pcr_div:+.4f}"
+            "points": 1, "note": f"{pcr_tier} Divergence = {pcr_div:+.4f}"
         }
 
         # C5: IV cheap (IVP < 50) (1 pt)
