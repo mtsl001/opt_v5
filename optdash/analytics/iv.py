@@ -52,8 +52,8 @@ def get_ivr_ivp(
 
         hist = conn.execute("""
             SELECT
-                MIN(daily_atm_iv) AS iv_low,
-                MAX(daily_atm_iv) AS iv_high,
+                PERCENTILE_CONT(?) WITHIN GROUP (ORDER BY daily_atm_iv) AS iv_low,
+                PERCENTILE_CONT(?) WITHIN GROUP (ORDER BY daily_atm_iv) AS iv_high,
                 PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY daily_atm_iv) AS iv_median
             FROM (
                 SELECT trade_date, AVG(iv) AS daily_atm_iv
@@ -63,7 +63,11 @@ def get_ivr_ivp(
                   AND trade_date >= ?
                 GROUP BY trade_date
             )
-        """, [underlying, trade_date, hist_start]).fetchone()
+        """, [
+            settings.IVR_LOW_PERCENTILE,
+            settings.IVR_HIGH_PERCENTILE,
+            underlying, trade_date, hist_start
+        ]).fetchone()
 
         iv_low    = hist[0] if hist and hist[0] else atm_iv * 0.5
         iv_high   = hist[1] if hist and hist[1] else atm_iv * 1.5
