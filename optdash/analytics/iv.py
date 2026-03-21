@@ -1,6 +1,7 @@
 """IV analytics -- IVR, IVP, term structure, shape detection."""
 from datetime import datetime, timedelta
 import duckdb
+import math
 from loguru import logger
 from optdash.config import settings
 from optdash.models import TermStructureShape
@@ -193,22 +194,33 @@ def get_term_structure(
         } for r in rows]
         near_iv = series[0]["atm_iv"]  if series          else None
         far_iv  = series[-1]["atm_iv"] if len(series) > 1 else near_iv
-        shape   = _classify_shape(near_iv, far_iv)
+        near_dte = int(series[0]["dte"] or 1) if series else 30
+        far_dte  = int(series[-1]["dte"] or 60) if len(series) > 1 else near_dte
+        shape   = _classify_shape(near_iv, far_iv, near_dte, far_dte)
         return {"series": series, "shape": shape, "near_iv": near_iv, "far_iv": far_iv}
     except Exception as e:
         logger.warning("get_term_structure error: {}", e)
         return {"series": [], "shape": "FLAT", "near_iv": None, "far_iv": None}
 
 
-def _classify_shape(near_iv: float | None, far_iv: float | None) -> str:
+def _classify_shape(
+    near_iv:  float | None,
+    far_iv:   float | None,
+    near_dte: int = 30,
+    far_dte:  int = 60,
+) -> str:
     # Issue-4: explicit None check — `not 0.0` is True in Python, so the old
     # `not near_iv` guard misclassified genuine zero IV as missing data.
     # near_iv == 0 guard prevents ZeroDivisionError on far_iv / near_iv.
     if near_iv is None or far_iv is None or near_iv == 0:
         return TermStructureShape.FLAT.value
-    ratio = far_iv / near_iv
-    if ratio > 1.05:
+    denom = math.sqrt(max(far_dte, 1)) - math.sqrt(max(near_dte, 1))
+    if denom <= 0:
+        # Same DTE or near > far — cannot compute meaningful slope
+        return TermStructureShape.FLAT.value
+    slope = (far_iv - near_iv) / denom
+    if slope > settings.TS_CONTANGO_SLOPE:
         return TermStructureShape.CONTANGO.value
-    if ratio < 0.95:
+    if slope < settings.TS_BACKWARDATION_SLOPE:
         return TermStructureShape.BACKWARDATION.value
     return TermStructureShape.FLAT.value

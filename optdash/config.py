@@ -411,6 +411,8 @@ class Settings(BaseSettings):
     IV_LOOKBACK_DAYS: int = 252
     IVR_LOW_PERCENTILE:      float = 0.01   # IV-2: 1st percentile for IVR low anchor
     IVR_HIGH_PERCENTILE:     float = 0.99   # IV-2: 99th percentile for IVR high anchor
+    TS_CONTANGO_SLOPE:       float =  0.30  # IV-3: annualized IV units per √day
+    TS_BACKWARDATION_SLOPE:  float = -0.30
     # IV crush HIGH severity Vega threshold -- per underlying.
     # Unit: option price points per 1% IV change (confirmed from screener
     # normalisation: vega / ltp / 0.50). NOT raw BSM decimal Vega.
