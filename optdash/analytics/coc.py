@@ -81,7 +81,8 @@ def get_coc_series(conn: duckdb.DuckDBPyConnection, trade_date: str, underlying:
             SELECT
                 snap_time,
                 AVG(fut_price) - AVG(spot) AS coc,
-                AVG(spot) AS spot,
+                AVG(spot)                  AS spot,
+                AVG(fut_price)             AS fut_price,
                 AVG(CASE WHEN dte > 0 THEN dte END) AS dte
             FROM options_data
             WHERE trade_date=? AND underlying=? AND instrument_type='FUT'
@@ -89,20 +90,26 @@ def get_coc_series(conn: duckdb.DuckDBPyConnection, trade_date: str, underlying:
         """, [trade_date, underlying]).fetchall()
         if not rows:
             return []
+        result = []   # Bug-1 fix: result must be initialised before the loop
         for i, r in enumerate(rows):
-            coc  = r[1] or 0
-            spot = r[2] or 1
-            dte  = r[3] or 30
+            coc       = r[1] or 0
+            spot      = r[2] or 1
+            fut_price = r[3] or 0
+            dte       = r[4] or 30
             vcoc = _compute_vcoc_from_series(rows, i)
-            
-            coc_pct = round((coc / spot) * (365 / max(dte, 1)) * 100, 4)
+
+            coc_pct  = round((coc  / spot) * (365 / max(dte, 1)) * 100, 4)
             vcoc_pct = round((vcoc / spot) * (365 / max(dte, 1)) * 100, 4)
-            
+
+            # Bug-2 fix: compute fair-value so series signal is consistent with live tile
+            fv_data = _fair_value_coc(spot, fut_price, int(dte), underlying)
+
             result.append({
-                "snap_time": r[0], "coc": round(coc, 2), "spot": r[2],
-                "v_coc_15m": round(vcoc, 2), "coc_pct": coc_pct, 
+                "snap_time": r[0], "coc": round(coc, 2), "spot": spot,
+                "v_coc_15m": round(vcoc, 2), "coc_pct": coc_pct,
                 "vcoc_pct": vcoc_pct, "dte": int(dte),
-                "signal": _coc_signal(coc, vcoc, spot, dte),
+                "signal": _coc_signal(coc, vcoc, spot, dte, fv_data["coc_fv_premium"]),
+                **fv_data,
             })
         return result
     except Exception as e:
@@ -250,9 +257,13 @@ def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = 30, coc_fv_
         if vcoc_pct < settings.VCOC_BEAR_THRESHOLD_PCT:
             return "VELOCITY_BEAR"
         
-        # DISCOUNT: use fair-value-adjusted premium if available, else raw coc_pct
-        discount_val = coc_fv_premium if coc_fv_premium is not None else coc_pct
-        if discount_val  < settings.COC_DISCOUNT_THRESHOLD_PCT:
+        # DISCOUNT: use fair-value-adjusted premium if available, normalised to
+        # annualized % so units match COC_DISCOUNT_THRESHOLD_PCT (Bug-3 fix).
+        if coc_fv_premium is not None:
+            discount_val = (coc_fv_premium / spot) * (365 / dte) * 100
+        else:
+            discount_val = coc_pct
+        if discount_val < settings.COC_DISCOUNT_THRESHOLD_PCT:
             return "DISCOUNT"
         return "NORMAL"
     # Fallback to absolute thresholds when spot/dte unavailable
