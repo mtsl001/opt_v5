@@ -367,9 +367,29 @@ class Settings(BaseSettings):
         "MIDCPNIFTY": 3.0, "NIFTYNXT50": 3.0,
     }
 
-    # -- PCR
+    # -- PCR divergence thresholds (asymmetric by design)
+    # PCR divergence = pcr_vol - pcr_oi.
+    # Positive divergence: volume PCR > OI PCR → retail accumulating puts faster
+    #   than OI is building → fear/panic into puts (bearish retail sentiment).
+    # Negative divergence: volume PCR < OI PCR → retail accumulating calls faster
+    #   than OI is building → greed/panic into calls (bullish retail sentiment).
+    #
+    # Asymmetry rationale: fear spikes faster and harder than greed. Retail panic
+    # into puts (VIX-driven, stop-loss driven) is a sharper, more reliable signal
+    # than retail call-buying (which is diffuse and driven by FOMO). Therefore the
+    # bull threshold (put-panic confirmation) is set higher (+0.25) than the bear
+    # threshold (-0.20) in absolute terms.
     PCR_DIV_BULL_THRESHOLD: float = 0.25
     PCR_DIV_BEAR_THRESHOLD: float = -0.20
+
+    # Rolling Z-score window for PCR divergence normalization (PCR-3).
+    # Unit: number of intraday snaps. At 1-min cadence: 30 snaps = 30-min rolling window.
+    # Increase for smoother Z-score; decrease for more reactive signal.
+    PCR_ZSCORE_WINDOW: int = 30
+
+    # PCR divergence trend lookback (PCR-4). Number of prior snaps for div_trend.
+    # At 1-min cadence: 3 snaps = 3-min trend window.
+    PCR_TREND_SNAPS: int = 3
 
     # -- OBI
     OBI_THRESHOLD: float = 0.10
