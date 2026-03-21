@@ -312,6 +312,21 @@ class Settings(BaseSettings):
     VCOC_SPIKE_EXPIRY_SNAPS: int   = 3
     COC_DISCOUNT_THRESHOLD:  float = -5.0
 
+    # -- CoC / V_CoC — annualized percentage thresholds (CoC-1)
+    # These replace the absolute point thresholds above once calibrated.
+    # Unit: annualized % (e.g. 5.0 = 5% annualized CoC velocity)
+    # Formula used: (delta_coc / spot) * (365 / dte) * 100
+    VCOC_BULL_THRESHOLD_PCT:     float = 5.0
+    VCOC_BEAR_THRESHOLD_PCT:     float = -5.0
+    COC_DISCOUNT_THRESHOLD_PCT:  float = -2.0
+
+    # -- CoC fair-value adjustment (CoC-2 — used from Commit 3 onwards)
+    RISK_FREE_RATE: float = 0.065   # 91-day T-bill; update quarterly
+    DIVIDEND_YIELD: dict[str, float] = {
+        "NIFTY": 0.012, "BANKNIFTY": 0.008, "FINNIFTY": 0.010,
+        "MIDCPNIFTY": 0.006, "NIFTYNXT50": 0.006,
+    }
+
     # -- VEX / CEX
     # VEX_BULL_THRESHOLD: global fallback for unknown underlyings only.
     # For all known underlyings, VEX_THRESHOLDS takes precedence.
@@ -387,7 +402,7 @@ class Settings(BaseSettings):
     @field_validator(
         "LOT_SIZES", "STRIKE_INTERVALS", "EXPIRY_WEEKDAY",
         "VEX_THRESHOLDS", "CEX_CHARM_THRESHOLD", "CEX_VANNA_THRESHOLD",
-        "FUT_OBI_BEAR_THRESHOLD", "IV_CRUSH_HIGH_VEGA",
+        "FUT_OBI_BEAR_THRESHOLD", "IV_CRUSH_HIGH_VEGA", "DIVIDEND_YIELD",
     )
     @classmethod
     def _check_underlying_coverage(cls, v: dict, info) -> dict:

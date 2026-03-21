@@ -22,7 +22,8 @@ def get_coc_latest(conn: duckdb.DuckDBPyConnection, trade_date: str,
                 snap_time,
                 AVG(fut_price)  AS fut_price,
                 AVG(spot)       AS spot,
-                AVG(fut_price) - AVG(spot) AS coc
+                AVG(fut_price) - AVG(spot) AS coc,
+                AVG(CASE WHEN dte > 0 THEN dte END) AS dte
             FROM options_data
             WHERE trade_date=? AND snap_time=? AND underlying=?
               AND instrument_type = 'FUT'
@@ -31,11 +32,20 @@ def get_coc_latest(conn: duckdb.DuckDBPyConnection, trade_date: str,
         if not row:
             return {}
         coc = row[3] or 0
+        dte = row[4] or 30
+        spot = row[2] or 1
         vcoc = _compute_vcoc(conn, trade_date, snap_time, underlying)
-        signal = _coc_signal(coc, vcoc)
+        
+        coc_pct = round((coc / spot) * (365 / max(dte, 1)) * 100, 4)
+        vcoc_pct = round((vcoc / spot) * (365 / max(dte, 1)) * 100, 4)
+        
+        signal = _coc_signal(coc, vcoc, spot, dte)
+        
         return {
             "snap_time": row[0], "fut_price": row[1], "spot": row[2],
-            "coc": round(coc, 2), "v_coc_15m": round(vcoc, 2), "signal": signal,
+            "coc": round(coc, 2), "v_coc_15m": round(vcoc, 2),
+            "coc_pct": coc_pct, "vcoc_pct": vcoc_pct, "dte": int(dte),
+            "signal": signal,
         }
     except Exception as e:
         record_error("get_coc_latest")
@@ -50,20 +60,28 @@ def get_coc_series(conn: duckdb.DuckDBPyConnection, trade_date: str, underlying:
             SELECT
                 snap_time,
                 AVG(fut_price) - AVG(spot) AS coc,
-                AVG(spot) AS spot
+                AVG(spot) AS spot,
+                AVG(CASE WHEN dte > 0 THEN dte END) AS dte
             FROM options_data
             WHERE trade_date=? AND underlying=? AND instrument_type='FUT'
             GROUP BY snap_time ORDER BY snap_time
         """, [trade_date, underlying]).fetchall()
         if not rows:
             return []
-        result = []
         for i, r in enumerate(rows):
             coc  = r[1] or 0
+            spot = r[2] or 1
+            dte  = r[3] or 30
             vcoc = _compute_vcoc_from_series(rows, i)
+            
+            coc_pct = round((coc / spot) * (365 / max(dte, 1)) * 100, 4)
+            vcoc_pct = round((vcoc / spot) * (365 / max(dte, 1)) * 100, 4)
+            
             result.append({
                 "snap_time": r[0], "coc": round(coc, 2), "spot": r[2],
-                "v_coc_15m": round(vcoc, 2), "signal": _coc_signal(coc, vcoc),
+                "v_coc_15m": round(vcoc, 2), "coc_pct": coc_pct, 
+                "vcoc_pct": vcoc_pct, "dte": int(dte),
+                "signal": _coc_signal(coc, vcoc, spot, dte),
             })
         return result
     except Exception as e:
@@ -202,7 +220,18 @@ def _compute_vcoc_from_series(rows: list, i: int) -> float:
     return round((rows[i][1] or 0) - (rows[i - lookback][1] or 0), 2)
 
 
-def _coc_signal(coc: float, vcoc: float) -> str:
+def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = 30) -> str:
+    if spot > 0 and dte > 0:
+        vcoc_pct = (vcoc / spot) * (365 / dte) * 100
+        coc_pct  = (coc  / spot) * (365 / dte) * 100
+        if vcoc_pct > settings.VCOC_BULL_THRESHOLD_PCT:
+            return "VELOCITY_BULL"
+        if vcoc_pct < settings.VCOC_BEAR_THRESHOLD_PCT:
+            return "VELOCITY_BEAR"
+        if coc_pct  < settings.COC_DISCOUNT_THRESHOLD_PCT:
+            return "DISCOUNT"
+        return "NORMAL"
+    # Fallback to absolute thresholds when spot/dte unavailable
     if vcoc > settings.VCOC_BULL_THRESHOLD:
         return "VELOCITY_BULL"
     if vcoc < settings.VCOC_BEAR_THRESHOLD:
