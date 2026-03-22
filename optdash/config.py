@@ -392,6 +392,18 @@ class Settings(BaseSettings):
     PCR_DIV_BULL_THRESHOLD: float = 0.25
     PCR_DIV_BEAR_THRESHOLD: float = -0.20
 
+    # PCR Z-score signal thresholds.
+    # Z-score = (current_div - rolling_mean) / rolling_std
+    # over PCR_ZSCORE_WINDOW snaps (default 20).
+    #
+    # PCR_Z_PANIC_THRESHOLD:     |Z| > this -> RETAIL_PANIC_PUTS / RETAIL_PANIC_CALLS
+    # PCR_Z_BUILDING_THRESHOLD:  |Z| > this -> DIVERGENCE_BUILDING (weaker signal)
+    # PCR_Z_FADING_TREND:        div_trend magnitude to trigger DIVERGENCE_FADING override.
+    #   Positive value: when puts-panic but div is falling by this much, signal softens.
+    PCR_Z_PANIC_THRESHOLD:    float = 1.5
+    PCR_Z_BUILDING_THRESHOLD: float = 0.8
+    PCR_Z_FADING_TREND:       float = 0.05
+
     # Rolling Z-score window for PCR divergence normalization (PCR-3).
     # Unit: number of intraday snaps. At 1-min cadence: 30 snaps = 30-min rolling window.
     # Increase for smoother Z-score; decrease for more reactive signal.
