@@ -21,6 +21,7 @@ from loguru import logger
 from optdash.config import settings
 from optdash.models import VexSignal, CexSignal
 from optdash.metrics import record_error
+from optdash.analytics.gex import get_net_gex
 
 
 def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
@@ -49,7 +50,12 @@ def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
         dealer_oc  = _is_dealer_oclock(snap_time, dte, underlying, trade_date)
         vex_signal = _classify_vex(vex_total, underlying)
         cex_signal = _classify_cex(cex_total, underlying)
-        interp     = _interpret(vex_signal, cex_signal, dealer_oc)
+        
+        # Fetch net GEX sign to determine charm hedging direction (VEX-5)
+        gex_data = get_net_gex(conn, trade_date, snap_time, underlying)
+        net_gex   = gex_data.get("gex_all_B", 0.0)
+
+        interp     = _interpret(vex_signal, cex_signal, dealer_oc, net_gex)
         return {
             "snap_time": snap_time,
             "vex_ce_M": round(row[0] or 0, 2), "vex_pe_M": round(row[1] or 0, 2),
@@ -59,6 +65,7 @@ def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
             "spot": row[6], "dte": dte,
             "vex_signal": vex_signal, "cex_signal": cex_signal,
             "dealer_oclock": dealer_oc, "interpretation": interp,
+            "net_gex_B":    round(net_gex, 3),
         }
     except Exception as e:
         record_error("get_vex_cex_current")
@@ -110,7 +117,7 @@ def _get_vex_cex_series(conn, trade_date, underlying) -> list[dict]:
                 "cex_ce_M": round(r[5] or 0, 2), "cex_pe_M": round(r[6] or 0, 2),
                 "spot": r[7], "dte": dte, "dealer_oclock": dealer_oc,
                 "vex_signal": vex_sig, "cex_signal": cex_sig,
-                "interpretation": _interpret(vex_sig, cex_sig, dealer_oc),
+                "interpretation": _interpret(vex_sig, cex_sig, dealer_oc, net_gex=0.0),
             })
         return result
     except Exception as e:
@@ -232,13 +239,36 @@ def _is_dealer_oclock(snap_time: str, dte: int, underlying: str, trade_date: str
     return today_weekday == expected_weekday
 
 
-def _interpret(vex_signal: str, cex_signal: str, dealer_oc: bool) -> str:
+def _interpret(vex_signal: str, cex_signal: str,
+               dealer_oc: bool, net_gex: float = 0.0) -> str:
+    """
+    Human-readable VEX/CEX signal interpretation.
+    CEX direction is GEX-conditional:
+      net_gex > 0 → dealers long options → charm forces them to SELL (bearish)
+      net_gex < 0 → dealers short options → charm forces them to BUY (bullish)
+    """
     if dealer_oc:
+        if cex_signal in (CexSignal.STRONG_CHARM_BID.value, CexSignal.CHARM_BID.value):
+            if net_gex < 0:
+                return ("Dealer O'Clock ACTIVE — GEX negative, charm forces dealer "
+                        "BUYING. Bullish pinning/squeeze likely into expiry.")
+            return ("Dealer O'Clock ACTIVE — GEX positive, charm forces dealer "
+                    "SELLING. Bearish drift / pin below likely.")
         return "Dealer O'Clock active — charm flows dominate expiry day mechanics."
+
     if vex_signal == VexSignal.VEX_BULLISH.value:
         return "IV drop forces dealer buying — bullish mechanical bias."
     if vex_signal == VexSignal.VEX_BEARISH.value:
         return "IV rise forces dealer selling — bearish mechanical pressure."
+
     if cex_signal == CexSignal.STRONG_CHARM_BID.value:
-        return "Strong charm bid — time decay buying pressure supports upside."
+        if net_gex < 0:
+            return ("Strong charm: dealers short options → buying underlying "
+                    "for delta hedge → bullish support.")
+        return ("Strong charm: dealers long options → selling underlying "
+                "for delta hedge → mild bearish drift.")
+    if cex_signal == CexSignal.CHARM_BID.value:
+        return "Charm bid building — monitor for directional confirmation."
+    if cex_signal == CexSignal.CHARM_PRESSURE.value:
+        return "Charm pressure — delta hedging adding supply."
     return "No dominant dealer flow signal."

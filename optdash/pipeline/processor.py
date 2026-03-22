@@ -46,9 +46,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import math
+
 import numpy as np
 import pandas as pd
 from loguru import logger
+from scipy.stats import norm
 
 from optdash.config import settings
 from optdash.pipeline.writer import write_snap, parquet_path
@@ -60,6 +63,70 @@ from optdash.pipeline.watermark import to_str as wm_str
 _GEX_SIGN  = {"CE": +1, "PE": -1}
 _VEX_SCALE = 1e6   # Rs M — matches vex_cex.py / 1e6 divisor
 _CEX_SCALE = 1e6
+
+
+def _bsm_d1_d2(
+    spot: float, strike: float, sigma: float, t: float, r: float
+) -> tuple[float | None, float | None]:
+    """
+    Compute BSM d1 and d2.
+    Returns (None, None) on invalid inputs to prevent downstream errors.
+    All inputs must be strictly positive (spot, strike, sigma, t > 0).
+    """
+    if spot <= 0 or strike <= 0 or sigma <= 0 or t <= 0:
+        return None, None
+    try:
+        d1 = (math.log(spot / strike) + (r + 0.5 * sigma ** 2) * t) / (sigma * math.sqrt(t))
+        d2 = d1 - sigma * math.sqrt(t)
+        return d1, d2
+    except (ValueError, ZeroDivisionError):
+        return None, None
+
+
+def _compute_exact_vanna(
+    spot: float, strike: float, sigma: float, t: float, r: float,
+    vanna_clip: float
+) -> float:
+    """
+    Exact BSM Vanna = -(Vega_BSM × d2) / (Spot × σ × √T)
+
+    Vanna measures how delta changes as implied volatility changes.
+    Positive vanna: delta increases as IV rises (call) or delta decreases as
+    IV drops (put). For a dealer short options, rising IV forces delta hedging.
+    """
+    d1, d2 = _bsm_d1_d2(spot, strike, sigma, t, r)
+    if d1 is None:
+        return 0.0
+    sqrt_t   = math.sqrt(t)
+    vega_bsm = spot * norm.pdf(d1) * sqrt_t      # S × N'(d1) × √T
+    denom    = spot * sigma * sqrt_t
+    if abs(denom) < 1e-10:
+        return 0.0
+    vanna = -(vega_bsm * d2) / denom
+    return float(max(-vanna_clip, min(vanna_clip, vanna)))
+
+
+def _compute_exact_charm(
+    spot: float, strike: float, sigma: float, t: float, r: float,
+    charm_clip: float
+) -> float:
+    """
+    Exact BSM Charm = -N'(d1) × [2rT - d2 × σ√T] / [2T × σ√T]
+
+    Charm = dDelta/dTime. Measures how much delta decays per unit of time.
+    On expiry day, charm flow is the primary driver of dealer delta-hedging.
+    Negative charm = delta decays toward 0 as time passes (typical for calls).
+    """
+    d1, d2 = _bsm_d1_d2(spot, strike, sigma, t, r)
+    if d1 is None or t <= 0:
+        return 0.0
+    sqrt_t     = math.sqrt(t)
+    numerator  = 2 * r * t - d2 * sigma * sqrt_t
+    denominator = 2 * t * sigma * sqrt_t
+    if abs(denominator) < 1e-10:
+        return 0.0
+    charm = -norm.pdf(d1) * (numerator / denominator)
+    return float(max(-charm_clip, min(charm_clip, charm)))
 
 # Output column order — MUST match PARQUET_SCHEMA field order in writer.py exactly.
 # Issue-R12: any column added/removed here must also be updated in
@@ -393,29 +460,58 @@ def _compute_gex_vex_cex(df: pd.DataFrame, lot_size: int) -> pd.DataFrame:
         opts["gamma"] * opts["oi"] * lot_size * spot_sq * 0.01 * opts["_dir"]
     )
 
-    # P2-1: vectorised sqrt_t via np.where + np.sqrt.
-    # dte=0 (expiry day) → sqrt_t=NaN so vex/cex remain NaN for expiry rows
+    # dte=0 (expiry day) → t=0 so vex/cex remain NaN/0 for expiry rows
     # (GEX is still computed above -- gamma is valid on expiry day).
-    # dte is Int32 (nullable); astype float64 converts NA → NaN automatically.
     dte_f  = opts["dte"].astype("float64")
-    sigma  = opts["iv"] / 100.0
-    sqrt_t = np.where(dte_f > 0, np.sqrt(dte_f / 365.0), np.nan)
-    denom  = pd.Series(
-        opts["spot"].values * sigma.values * sqrt_t,
-        index=opts.index,
-    ).replace(0, np.nan)
+    t_val  = dte_f.fillna(0).clip(lower=0) / 365.0
+    sig_val = opts["iv"].fillna(0) / 100.0
+    r_val   = settings.RISK_FREE_RATE
+
+    opts["_t_val"] = t_val
+    opts["_sig_val"] = sig_val
+    opts["_spot"] = opts["spot"].fillna(0.0)
+    opts["_strike"] = opts["strike_price"].fillna(0.0)
+
+    # VEX-1 & VEX-2: Exact BSM vanna and charm.
+    # Compute using helpers with inf clip to expose raw values for VEX-3 tracking.
+    raw_vanna = opts.apply(lambda row: _compute_exact_vanna(
+        row["_spot"], row["_strike"], row["_sig_val"], row["_t_val"], r_val, float('inf')
+    ), axis=1)
+    
+    raw_charm = opts.apply(lambda row: _compute_exact_charm(
+        row["_spot"], row["_strike"], row["_sig_val"], row["_t_val"], r_val, float('inf')
+    ), axis=1)
+
+    vanna = raw_vanna.clip(-settings.VANNA_CLIP, settings.VANNA_CLIP)
+    charm = raw_charm.clip(-settings.CHARM_CLIP, settings.CHARM_CLIP)
 
     # VEX — stored in Rs M (already divided by 1e6 = _VEX_SCALE).
-    # vex_cex.py queries SUM(vex) directly; no further /1e6 in SQL.
-    vanna        = opts["delta"] * (1.0 - opts["delta"].abs()) / denom
-    vanna        = vanna.clip(-settings.VANNA_CLIP, settings.VANNA_CLIP)  # P0-3
     opts["vex"]  = (opts["oi"] * lot_size * vanna * opts["spot"]) / _VEX_SCALE
 
     # CEX — stored in Rs M (already divided by 1e6 = _CEX_SCALE).
-    # vex_cex.py queries SUM(cex) directly; no further /1e6 in SQL.
-    charm        = -opts["theta"] / denom
-    charm        = charm.clip(-settings.CHARM_CLIP, settings.CHARM_CLIP)  # P0-2
     opts["cex"]  = (opts["oi"] * lot_size * charm) / _CEX_SCALE
+
+    total_opt_rows   = len(opts)
+    clip_count_vanna = int((raw_vanna.abs() > settings.VANNA_CLIP).sum())
+    clip_count_charm = int((raw_charm.abs() > settings.CHARM_CLIP).sum())
+
+    if total_opt_rows > 0:
+        vanna_rate = clip_count_vanna / total_opt_rows
+        charm_rate = clip_count_charm / total_opt_rows
+        underlying = str(df["underlying"].iloc[0]) if not df.empty else "UNKNOWN"
+
+        if vanna_rate > 0.05:
+            logger.warning(
+                "HIGH VANNA CLIP RATE {:.1%} ({}/{} rows) for {}. "
+                "Check for near-zero IV rows in BQ feed.",
+                vanna_rate, clip_count_vanna, total_opt_rows, underlying
+            )
+        if charm_rate > 0.05:
+            logger.warning(
+                "HIGH CHARM CLIP RATE {:.1%} ({}/{} rows) for {}. "
+                "Check for near-zero IV rows in BQ feed.",
+                charm_rate, clip_count_charm, total_opt_rows, underlying
+            )
 
     # Explicit float64 cast avoids FutureWarning about setting incompatible
     # dtype (opts may contain pd.NA from nullable-int OI arithmetic).

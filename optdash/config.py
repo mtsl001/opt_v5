@@ -332,11 +332,21 @@ class Settings(BaseSettings):
     # For all known underlyings, VEX_THRESHOLDS takes precedence.
     VEX_BULL_THRESHOLD:  float = 0.0
     # Per-underlying VEX magnitude thresholds (Rs M).
-    # Scaled to index liquidity: liquid large-caps (NIFTY/BANKNIFTY) need a
-    # higher bar to filter noise; illiquid underlyings need a lower bar.
     VEX_THRESHOLDS: dict[str, float] = {
-        "NIFTY": 0.50, "BANKNIFTY": 0.50, "FINNIFTY": 0.25,
-        "MIDCPNIFTY": 0.15, "NIFTYNXT50": 0.15,
+        # Threshold = minimum |VEX| in Rs M to classify as VEX_BULLISH/BEARISH.
+        # Calibration (Mar 2026) based on notional-per-lot = spot × lot_size:
+        #   NIFTY:       ~24000 × 75  = 1.80M  → 0.50 (high notional, strong signal)
+        #   BANKNIFTY:   ~52000 × 15  = 0.78M  → 0.35 (lower notional per lot;
+        #                                               threshold reduced proportionally)
+        #   FINNIFTY:    ~25000 × 40  = 1.00M  → 0.25 (smaller OI base)
+        #   MIDCPNIFTY:  ~12000 × 120 = 1.44M  → 0.15 (thin liquidity)
+        #   NIFTYNXT50:  ~80000 × 10  = 0.80M  → 0.15 (very thin OI)
+        # Review after 30 live trading days.
+        "NIFTY":      0.50,
+        "BANKNIFTY":  0.35,   # was 0.50
+        "FINNIFTY":   0.25,
+        "MIDCPNIFTY": 0.15,
+        "NIFTYNXT50": 0.15,
     }
     CEX_STRONG_BID:    float = 20.0
     CEX_BID:           float = 5.0
@@ -413,12 +423,38 @@ class Settings(BaseSettings):
     IVR_HIGH_PERCENTILE:     float = 0.99   # IV-2: 99th percentile for IVR high anchor
     TS_CONTANGO_SLOPE:       float =  0.30  # IV-3: annualized IV units per √day
     TS_BACKWARDATION_SLOPE:  float = -0.30
-    VRP_OVERPRICED_THRESHOLD: float =  2.0   # IV-4: IV exceeds HV20 by 2 pts → sellers favored
-    VRP_UNDERPRICED_THRESHOLD: float =  0.0   # IV-4: IV below HV20 → buyers favored
 
-    # -- India VIX (new section)
-    VIX_HIGH_THRESHOLD:      float = 20.0   # IV-6: VIX above this = HIGH regime
-    VIX_HIGH_IVP_THRESHOLD:  float = 35.0   # IV-6b: IVP threshold when VIX is HIGH
+    # VRP = ATM_IV - HV20  (both in %, e.g. IV=18.5, HV20=14.2 → VRP=+4.3)
+    # OVERPRICED  (VRP > +2.0): options expensive vs realised vol — sellers edge.
+    #             Buyers should require stronger signal confirmation.
+    # UNDERPRICED (VRP <  0.0): options cheaper than realised vol — buyers edge.
+    #             Mathematical edge for option buying is highest here.
+    # FAIR        (0.0 ≤ VRP ≤ 2.0): normal conditions.
+    VRP_OVERPRICED_THRESHOLD:  float = 2.0
+    VRP_UNDERPRICED_THRESHOLD: float = 0.0
+
+    @field_validator("VRP_UNDERPRICED_THRESHOLD")
+    @classmethod
+    def _check_vrp_thresholds(cls, v: float, info) -> float:
+        overpriced = (info.data or {}).get("VRP_OVERPRICED_THRESHOLD", 2.0)
+        if v >= overpriced:
+            raise ValueError(
+                f"VRP_UNDERPRICED_THRESHOLD={v} must be < VRP_OVERPRICED_THRESHOLD={overpriced}."
+            )
+        return v
+
+    # India VIX gate parameters
+    # VIX_HIGH_THRESHOLD:     VIX above this tightens Gate C5 IVP requirement.
+    # VIX_HIGH_IVP_THRESHOLD: In high-VIX regime, IVP must be < 35 (not < 50)
+    #                         to score the "IV cheap" gate point.
+    VIX_HIGH_THRESHOLD:     float = 20.0
+    VIX_HIGH_IVP_THRESHOLD: float = 35.0
+
+    # Risk-free rate for exact BSM Greek computation.
+    # Use RBI repo rate (annualised decimal). Update when RBI changes policy rate.
+    # Current RBI repo rate: 6.25% as of Mar 2026.
+    # Override in .env: RISK_FREE_RATE=0.0650
+    RISK_FREE_RATE: float = 0.0625
     # IV crush HIGH severity Vega threshold -- per underlying.
     # Unit: option price points per 1% IV change (confirmed from screener
     # normalisation: vega / ltp / 0.50). NOT raw BSM decimal Vega.
