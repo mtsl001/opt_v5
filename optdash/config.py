@@ -332,11 +332,21 @@ class Settings(BaseSettings):
     # For all known underlyings, VEX_THRESHOLDS takes precedence.
     VEX_BULL_THRESHOLD:  float = 0.0
     # Per-underlying VEX magnitude thresholds (Rs M).
-    # Scaled to index liquidity: liquid large-caps (NIFTY/BANKNIFTY) need a
-    # higher bar to filter noise; illiquid underlyings need a lower bar.
     VEX_THRESHOLDS: dict[str, float] = {
-        "NIFTY": 0.50, "BANKNIFTY": 0.50, "FINNIFTY": 0.25,
-        "MIDCPNIFTY": 0.15, "NIFTYNXT50": 0.15,
+        # Threshold = minimum |VEX| in Rs M to classify as VEX_BULLISH/BEARISH.
+        # Calibration (Mar 2026) based on notional-per-lot = spot × lot_size:
+        #   NIFTY:       ~24000 × 75  = 1.80M  → 0.50 (high notional, strong signal)
+        #   BANKNIFTY:   ~52000 × 15  = 0.78M  → 0.35 (lower notional per lot;
+        #                                               threshold reduced proportionally)
+        #   FINNIFTY:    ~25000 × 40  = 1.00M  → 0.25 (smaller OI base)
+        #   MIDCPNIFTY:  ~12000 × 120 = 1.44M  → 0.15 (thin liquidity)
+        #   NIFTYNXT50:  ~80000 × 10  = 0.80M  → 0.15 (very thin OI)
+        # Review after 30 live trading days.
+        "NIFTY":      0.50,
+        "BANKNIFTY":  0.35,   # was 0.50
+        "FINNIFTY":   0.25,
+        "MIDCPNIFTY": 0.15,
+        "NIFTYNXT50": 0.15,
     }
     CEX_STRONG_BID:    float = 20.0
     CEX_BID:           float = 5.0
