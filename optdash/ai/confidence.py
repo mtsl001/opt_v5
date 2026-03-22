@@ -66,12 +66,12 @@ def compute_confidence(
     # The explicit None guard is an extra safety net for future callers.
     is_fallback  = learning_stats.get("is_fallback", False)
     total_trades = learning_stats.get("total_trades", 0)
-    if is_fallback or total_trades < 5:
+    if is_fallback or total_trades < settings.CONFIDENCE_B4_MIN_TRADES:
         b4 = 0
     else:
         raw_wr = learning_stats.get("win_rate")
         win_rate = (raw_wr / 100) if raw_wr is not None else 0.5
-        b4 = min(10, int(win_rate * 12))
+        b4 = min(settings.CONFIDENCE_B4_MAX, int(win_rate * settings.CONFIDENCE_B4_SCALE))
 
     raw = b1 + b2 + b3 + b4
 

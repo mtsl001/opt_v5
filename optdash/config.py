@@ -567,6 +567,20 @@ class Settings(BaseSettings):
     TRAILING_STOP_TRAIL_PCT:    float = 0.10
     GATE_SUSTAINED_NO_GO_SNAPS: int   = 2
 
+    # -- Confidence
+    # Bucket 4: Historical Performance gate.
+    # Minimum number of closed trades required before win_rate is trusted.
+    # Below this threshold, B4 = 0 (cold-start protection).
+    CONFIDENCE_B4_MIN_TRADES: int = 5
+
+    # Bucket 4 max raw points (before min() cap).
+    # Keep in sync with Bucket 4 cap in compute_confidence().
+    # Formula: b4 = min(CONFIDENCE_B4_MAX, int(win_rate * CONFIDENCE_B4_SCALE))
+    # At 100% win rate: int(1.0 * 12) = 12, capped to 10 = max pts.
+    # At 83.3% win rate: int(0.833 * 12) = 9 pts.
+    CONFIDENCE_B4_MAX:   int = 10
+    CONFIDENCE_B4_SCALE: int = 12   # denominator ceiling; keep at 1.2× B4_MAX
+
     SESSION_MIDDAY_CONFIDENCE_PENALTY: int = 10
     SESSION_CLOSING_CONFIDENCE_CAP:    int = 60
 
