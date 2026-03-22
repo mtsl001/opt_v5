@@ -49,6 +49,14 @@ def compute_confidence(
     vex_sig = vex_data.get("vex_signal", "")
     if vex_sig == "VEX_BULLISH" and direction == "CE":  b3 += 3
     if vex_sig == "VEX_BEARISH" and direction == "PE":  b3 += 3
+
+    # VRP bonus (+3): when VRP < 0, options are genuinely underpriced vs realised vol.
+    # This is the statistically strongest entry context for option buyers.
+    # Source: iv_data["vrp_regime"] from get_ivr_ivp().
+    vrp_regime = iv_data.get("vrp_regime", "UNKNOWN")
+    if vrp_regime == "UNDERPRICED":
+        b3 += 3
+
     b3 = min(25, b3)
 
     # Bucket 4: historical performance — P4-F14b: cold-start guard.
