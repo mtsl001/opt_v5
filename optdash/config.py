@@ -449,6 +449,12 @@ class Settings(BaseSettings):
     #                         to score the "IV cheap" gate point.
     VIX_HIGH_THRESHOLD:     float = 20.0
     VIX_HIGH_IVP_THRESHOLD: float = 35.0
+
+    # Risk-free rate for exact BSM Greek computation.
+    # Use RBI repo rate (annualised decimal). Update when RBI changes policy rate.
+    # Current RBI repo rate: 6.25% as of Mar 2026.
+    # Override in .env: RISK_FREE_RATE=0.0650
+    RISK_FREE_RATE: float = 0.0625
     # IV crush HIGH severity Vega threshold -- per underlying.
     # Unit: option price points per 1% IV change (confirmed from screener
     # normalisation: vega / ltp / 0.50). NOT raw BSM decimal Vega.
