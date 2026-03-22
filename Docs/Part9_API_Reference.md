@@ -89,6 +89,7 @@ Returns:
 |---|---|---|
 | GET | `/api/micro/pcr` | PCR vol + OI + divergence signal |
 | GET | `/api/micro/vex-cex` | VEX/CEX series + dealer o'clock |
+| GET | `/api/micro/vex-cex/by-strike` | Per-strike VEX and CEX breakdowns formatted for UI Heatmaps |
 | GET | `/api/micro/volume-velocity` | Volume heatmap per strike |
 | GET | `/api/micro/alerts` | Live alerts list |
 

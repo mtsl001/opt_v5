@@ -102,13 +102,16 @@ There is no hardcoded constant elsewhere — every tunable value reads from `set
 | `TRAILING_STOP_ACTIVATION` | `0.20` | Activate trailing stop at +20% PnL |
 | `TRAILING_STOP_TRAIL_PCT` | configurable | Trail below current LTP by this fraction |
 | `GATE_SUSTAINED_NO_GO_SNAPS` | `2` | Consecutive NO_GO snaps before auto-close |
+| `ZGL_PROXIMITY_PCT` | `0.5` | Fire APPROACHING_ZGL alert when Spot is within X% of ZGL |
 
-### Confidence Session Adjustment
+### Confidence Scoring Parameters
 
 | Variable | Default |
 |---|---|
 | `SESSION_MIDDAY_CONFIDENCE_PENALTY` | `10` |
 | `SESSION_CLOSING_CONFIDENCE_CAP` | `60` |
+| `CONFIDENCE_B4_MIN_TRADES` | `5` |
+| `CONFIDENCE_B4_SCALE` | `12` |
 
 ### Strike Screener
 
@@ -135,6 +138,12 @@ There is no hardcoded constant elsewhere — every tunable value reads from `set
 | Variable | Default |
 |---|---|
 | `IV_LOOKBACK_DAYS` | `252` |
+| `VRP_OVERPRICED_THRESHOLD` | `2.0` |
+| `VRP_UNDERPRICED_THRESHOLD` | `0.0` |
+| `VIX_HIGH_THRESHOLD` | `20.0` |
+| `VIX_HIGH_IVP_THRESHOLD` | `35.0` |
+| `RISK_FREE_RATE` | `0.0625` |
+| `SKEW_ELEVATED_THRESHOLD` | `5.0` | 
 
 ### GEX Analytics
 
@@ -157,6 +166,14 @@ There is no hardcoded constant elsewhere — every tunable value reads from `set
 | Variable | Default |
 |---|---|
 | `OBI_THRESHOLD` | `0.10` |
+
+### PCR Analytics
+
+| Variable | Default |
+|---|---|
+| `PCR_Z_PANIC_THRESHOLD` | `1.5` |
+| `PCR_Z_BUILDING_THRESHOLD` | `0.8` |
+| `PCR_Z_FADING_TREND` | `0.05` |
 
 ---
 

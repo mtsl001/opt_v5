@@ -229,6 +229,21 @@ def _classify_shape(near_iv, far_iv) -> str:
 
 > `near_iv == 0` guard prevents `ZeroDivisionError`. `near_iv is None or near_iv == 0` — never `not near_iv` which would misclassify a genuine zero IV.
 
+### 4.3 Volatility Risk Premium (VRP) & Skew
+
+**Volatility Risk Premium (VRP):**
+```
+VRP = atm_iv - hv20
+```
+Categorized into rigorous regimes: `OVERPRICED` (>2.0), `UNDERPRICED` (<0.0), or `FAIR`.
+
+**25-Delta Skew:**
+`get_iv_skew()` queries the nearest options to `0.25` absolute delta.
+```
+Skew = Put_25d_IV - Call_25d_IV
+```
+It computes tracking metrics `skew_direction` (`STEEPENING` / `FLATTENING`) based on trailing snaps, and signals an `ELEVATED` regime if it exceeds `settings.SKEW_ELEVATED_THRESHOLD`.
+
 ---
 
 ## 5. VEX/CEX Analytics (`analytics/vex_cex.py`)
@@ -260,12 +275,14 @@ strong_thr = settings.CEX_CHARM_THRESHOLD.get(underlying, settings.CEX_STRONG_BI
 bid_thr    = settings.CEX_VANNA_THRESHOLD.get(underlying, settings.CEX_BID)
 ```
 
-| CEX | Signal |
-|---|---|
-| `>= strong_thr` | `STRONG_CHARM_BID` |
-| `>= bid_thr` | `CHARM_BID` |
-| `<= -strong_thr` | `CHARM_PRESSURE` |
-| Between | `NEUTRAL` |
+The CEX interpretation is contextually bounded by the **Net GEX** regime. If dealers are *net short* gamma (Negative GEX), their charm delta hedging reverses direction:
+
+| CEX (Normal/Positive GEX) | Signal | Meaning |
+|---|---|---|
+| `>= strong_thr` | `STRONG_CHARM_BID` | Dealers must rapidly buy delta as options decay |
+| `<= -strong_thr` | `CHARM_PRESSURE` | Dealers must rapidly sell delta |
+
+*(Note: If Net GEX < 0, a mathematically positive CEX induces `CHARM_PRESSURE`, explicitly inverting the hedge direction).*
 
 ### 5.4 Dealer O'Clock (`_is_dealer_oclock`)
 
