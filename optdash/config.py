@@ -413,12 +413,32 @@ class Settings(BaseSettings):
     IVR_HIGH_PERCENTILE:     float = 0.99   # IV-2: 99th percentile for IVR high anchor
     TS_CONTANGO_SLOPE:       float =  0.30  # IV-3: annualized IV units per √day
     TS_BACKWARDATION_SLOPE:  float = -0.30
-    VRP_OVERPRICED_THRESHOLD: float =  2.0   # IV-4: IV exceeds HV20 by 2 pts → sellers favored
-    VRP_UNDERPRICED_THRESHOLD: float =  0.0   # IV-4: IV below HV20 → buyers favored
 
-    # -- India VIX (new section)
-    VIX_HIGH_THRESHOLD:      float = 20.0   # IV-6: VIX above this = HIGH regime
-    VIX_HIGH_IVP_THRESHOLD:  float = 35.0   # IV-6b: IVP threshold when VIX is HIGH
+    # VRP = ATM_IV - HV20  (both in %, e.g. IV=18.5, HV20=14.2 → VRP=+4.3)
+    # OVERPRICED  (VRP > +2.0): options expensive vs realised vol — sellers edge.
+    #             Buyers should require stronger signal confirmation.
+    # UNDERPRICED (VRP <  0.0): options cheaper than realised vol — buyers edge.
+    #             Mathematical edge for option buying is highest here.
+    # FAIR        (0.0 ≤ VRP ≤ 2.0): normal conditions.
+    VRP_OVERPRICED_THRESHOLD:  float = 2.0
+    VRP_UNDERPRICED_THRESHOLD: float = 0.0
+
+    @field_validator("VRP_UNDERPRICED_THRESHOLD")
+    @classmethod
+    def _check_vrp_thresholds(cls, v: float, info) -> float:
+        overpriced = (info.data or {}).get("VRP_OVERPRICED_THRESHOLD", 2.0)
+        if v >= overpriced:
+            raise ValueError(
+                f"VRP_UNDERPRICED_THRESHOLD={v} must be < VRP_OVERPRICED_THRESHOLD={overpriced}."
+            )
+        return v
+
+    # India VIX gate parameters
+    # VIX_HIGH_THRESHOLD:     VIX above this tightens Gate C5 IVP requirement.
+    # VIX_HIGH_IVP_THRESHOLD: In high-VIX regime, IVP must be < 35 (not < 50)
+    #                         to score the "IV cheap" gate point.
+    VIX_HIGH_THRESHOLD:     float = 20.0
+    VIX_HIGH_IVP_THRESHOLD: float = 35.0
     # IV crush HIGH severity Vega threshold -- per underlying.
     # Unit: option price points per 1% IV change (confirmed from screener
     # normalisation: vega / ltp / 0.50). NOT raw BSM decimal Vega.
