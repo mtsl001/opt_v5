@@ -4,10 +4,86 @@ from loguru import logger
 from optdash.config import settings
 from optdash.models import AlertType, AlertSeverity
 from optdash.metrics import record_error
-from optdash.analytics.gex import get_gex_series
+from optdash.analytics.gex import get_gex_series, get_net_gex
 from optdash.analytics.coc import get_coc_series
 from optdash.analytics.pcr import get_pcr_series
 from optdash.analytics.microstructure import get_volume_velocity
+from optdash.analytics.iv import get_iv_skew
+from optdash.analytics.vex_cex import get_vex_cex_current
+
+def _check_skew_vex_convergence(
+    skew_data: dict,
+    vex_data:  dict,
+    underlying: str,
+    snap_time: str,
+) -> dict | None:
+    """
+    HIGH_CONVICTION_BEAR alert fires when:
+      1. Skew is STEEPENING (put-wing demand accelerating)
+      AND
+      2. VEX total is below -threshold (bearish vanna pressure from dealers)
+    """
+    if not settings.SKEW_STEEPENING_VEX_CONFIRM:
+        return None
+
+    skew_direction = skew_data.get("skew_direction", "UNKNOWN")
+    vex_total      = vex_data.get("vex_total_M", 0.0)
+    vex_threshold  = settings.VEX_THRESHOLDS.get(underlying, settings.VEX_BULL_THRESHOLD)
+
+    skew_steepening = (skew_direction == "STEEPENING")
+    vex_bearish     = (vex_total < -vex_threshold)
+
+    if skew_steepening and vex_bearish:
+        return {
+            "type":        "HIGH_CONVICTION_BEAR",
+            "time":        snap_time,
+            "severity":    "HIGH",
+            "direction":   "PE",
+            "headline":    f"Skew steepening ({skew_data.get('skew', 'N/A')}%) + VEX bearish ({round(vex_total, 2)} Rs M)",
+            "message":     f"vanna-accelerated selling pressure confirmed. High-conviction downside setup.",
+            "skew":        skew_data.get("skew"),
+            "vex_total_M": vex_total,
+        }
+    return None
+
+def _check_zgl_proximity(gex_data: dict, spot: float | None, snap_time: str) -> dict | None:
+    """
+    Fires APPROACHING_ZGL / BELOW_ZGL alert when spot moves around the
+    Zero Gamma Level.
+    """
+    zgl       = gex_data.get("zgl")
+    above_zgl = gex_data.get("above_zgl")
+    dist_pct  = gex_data.get("spot_vs_zgl")
+
+    if zgl is None or dist_pct is None:
+        return None
+
+    proximity_threshold = settings.ZGL_PROXIMITY_PCT
+
+    if above_zgl is False:
+        return {
+            "type":        "BELOW_ZGL",
+            "time":        snap_time,
+            "severity":    "HIGH",
+            "direction":   None,
+            "headline":    f"Below Zero Gamma Level ({zgl})",
+            "message":     f"Spot is {abs(dist_pct):.1f}% BELOW Zero Gamma Level. Dealers net short gamma — trending/volatile regime. Avoid mean-reversion strategies.",
+            "zgl":         zgl,
+            "spot_vs_zgl": dist_pct,
+        }
+
+    if above_zgl is True and abs(dist_pct) < proximity_threshold:
+        return {
+            "type":        "APPROACHING_ZGL",
+            "time":        snap_time,
+            "severity":    "MEDIUM",
+            "direction":   None,
+            "headline":    f"Approaching Zero Gamma Level ({zgl})",
+            "message":     f"Spot is within {abs(dist_pct):.1f}% of Zero Gamma Level. If spot crosses below ZGL, regime flips to trending. Monitor closely.",
+            "zgl":         zgl,
+            "spot_vs_zgl": dist_pct,
+        }
+    return None
 
 
 def get_alerts(
@@ -138,6 +214,20 @@ def get_alerts(
                 headline=f"Volume spike: {ratio:.1f}x baseline",
                 message=f"Current volume {ratio:.1f}x above rolling median -- unusual activity detected.",
             ))
+
+        # Skew x VEX convergence (B-2)
+        skew_data = get_iv_skew(conn, trade_date, snap_time, underlying)
+        vex_data  = get_vex_cex_current(conn, trade_date, snap_time, underlying)
+        skew_vex_alert = _check_skew_vex_convergence(skew_data, vex_data, underlying, snap_time)
+        if skew_vex_alert:
+            alerts.append(skew_vex_alert)
+            
+        # ZGL proximity (B-7)
+        gex_current = get_net_gex(conn, trade_date, snap_time, underlying)
+        spot = gex_current.get("spot")
+        zgl_alert = _check_zgl_proximity(gex_current, spot, snap_time)
+        if zgl_alert:
+            alerts.append(zgl_alert)
 
     except Exception as e:
         record_error("get_alerts")

@@ -282,3 +282,119 @@ def get_india_vix(trade_date: str, snap_time: str) -> float | None:
     except Exception as e:
         logger.debug("get_india_vix: read failed (non-critical) — {}", e)
         return None
+
+def get_iv_skew(
+    conn:       duckdb.DuckDBPyConnection,
+    trade_date: str,
+    snap_time:  str,
+    underlying: str,
+) -> dict:
+    """
+    Compute 25-delta put/call IV skew for TIER1 options.
+
+    Skew = IV of the strike closest to 25-delta PUT minus
+           IV of the strike closest to 25-delta CALL.
+
+    Positive skew: put wing more expensive than call wing (normal for indices).
+    Rising skew: fear increasing, put demand accelerating.
+    This is the standard skew measure used by dealers and vol desks.
+
+    Returns:
+        skew:           float — current skew value (in IV %)
+        put_25d_iv:     float — IV of nearest 25-delta put strike
+        call_25d_iv:    float — IV of nearest 25-delta call strike
+        skew_direction: str   — "STEEPENING" / "FLATTENING" / "FLAT" / "UNKNOWN"
+        skew_regime:    str   — "ELEVATED" (> threshold) / "NORMAL" / "UNKNOWN"
+    """
+    try:
+        # Find nearest-to-0.25-delta strikes for CE and PE
+        row = conn.execute("""
+            WITH t1 AS (
+                SELECT option_type, strike_price, iv, delta
+                FROM options_data
+                WHERE trade_date=? AND snap_time=? AND underlying=?
+                  AND expiry_tier='TIER1' AND iv > 0
+            ),
+            puts AS (
+                SELECT iv, delta, strike_price
+                FROM t1
+                WHERE option_type='PE'
+                ORDER BY ABS(ABS(delta) - 0.25)
+                LIMIT 1
+            ),
+            calls AS (
+                SELECT iv, delta, strike_price
+                FROM t1
+                WHERE option_type='CE'
+                ORDER BY ABS(ABS(delta) - 0.25)
+                LIMIT 1
+            )
+            SELECT p.iv AS put_iv, c.iv AS call_iv
+            FROM puts p, calls c
+        """, [trade_date, snap_time, underlying]).fetchone()
+
+        if not row or row[0] is None or row[1] is None:
+            return {"skew": None, "put_25d_iv": None, "call_25d_iv": None,
+                    "skew_direction": "UNKNOWN", "skew_regime": "UNKNOWN"}
+
+        put_iv  = float(row[0])
+        call_iv = float(row[1])
+        skew    = round(put_iv - call_iv, 2)
+
+        # Trailing skew trend: compare to skew 3 snaps ago
+        prev_row = conn.execute("""
+            WITH ordered AS (
+                SELECT snap_time
+                FROM options_data
+                WHERE trade_date=? AND underlying=? AND snap_time < ?
+                GROUP BY snap_time
+                ORDER BY snap_time DESC
+                LIMIT 3
+            ),
+            oldest AS (SELECT MIN(snap_time) AS st FROM ordered),
+            puts AS (
+                SELECT o.iv
+                FROM options_data o, oldest old_s
+                WHERE o.trade_date=? AND o.snap_time=old_s.st
+                  AND o.underlying=? AND o.expiry_tier='TIER1'
+                  AND o.option_type='PE' AND o.iv > 0
+                ORDER BY ABS(ABS(o.delta) - 0.25) LIMIT 1
+            ),
+            calls AS (
+                SELECT o.iv
+                FROM options_data o, oldest old_s
+                WHERE o.trade_date=? AND o.snap_time=old_s.st
+                  AND o.underlying=? AND o.expiry_tier='TIER1'
+                  AND o.option_type='CE' AND o.iv > 0
+                ORDER BY ABS(ABS(o.delta) - 0.25) LIMIT 1
+            )
+            SELECT p.iv, c.iv FROM puts p, calls c
+        """, [trade_date, underlying, snap_time,
+                trade_date, underlying,
+                trade_date, underlying]).fetchone()
+
+        skew_direction = "UNKNOWN"
+        if prev_row and prev_row[0] is not None and prev_row[1] is not None:
+            prev_skew = float(prev_row[0]) - float(prev_row[1])
+            delta_skew = skew - prev_skew
+            if delta_skew > 0.3:
+                skew_direction = "STEEPENING"
+            elif delta_skew < -0.3:
+                skew_direction = "FLATTENING"
+            else:
+                skew_direction = "FLAT"
+
+        skew_threshold = settings.SKEW_ELEVATED_THRESHOLD   # add to config (see Step 2)
+        skew_regime = "ELEVATED" if skew > skew_threshold else "NORMAL"
+
+        return {
+            "skew":           skew,
+            "put_25d_iv":     round(put_iv, 2),
+            "call_25d_iv":    round(call_iv, 2),
+            "skew_direction": skew_direction,
+            "skew_regime":    skew_regime,
+        }
+    except Exception as e:
+        logger.warning("get_iv_skew error: {}", e)
+        return {"skew": None, "put_25d_iv": None, "call_25d_iv": None,
+                "skew_direction": "UNKNOWN", "skew_regime": "UNKNOWN"}

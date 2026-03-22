@@ -467,6 +467,17 @@ class Settings(BaseSettings):
     # Current RBI repo rate: 6.25% as of Mar 2026.
     # Override in .env: RISK_FREE_RATE=0.0650
     RISK_FREE_RATE: float = 0.0625
+
+    # Skew = 25D Put IV - 25D Call IV (in IV %)
+    # Typical NIFTY skew range: 2-6%. Above 6% = elevated fear premium.
+    # SKEW_ELEVATED_THRESHOLD: above this, put-skew is considered "elevated".
+    # Used in SkewxVEX convergence alert (B-2).
+    SKEW_ELEVATED_THRESHOLD: float = 5.0
+
+    # SKEW_STEEPENING_VEX_CONFIRM: when skew is STEEPENING and VEX < -threshold,
+    # this triggers HIGH_CONVICTION_BEAR alert.
+    # These two signals together confirm vanna-accelerated selling pressure.
+    SKEW_STEEPENING_VEX_CONFIRM: bool = True
     # IV crush HIGH severity Vega threshold -- per underlying.
     # Unit: option price points per 1% IV change (confirmed from screener
     # normalisation: vega / ltp / 0.50). NOT raw BSM decimal Vega.
@@ -566,6 +577,10 @@ class Settings(BaseSettings):
     # Override via TRAILING_STOP_TRAIL_PCT= in .env for strategy tuning.
     TRAILING_STOP_TRAIL_PCT:    float = 0.10
     GATE_SUSTAINED_NO_GO_SNAPS: int   = 2
+
+    # ZGL_PROXIMITY_PCT: distance from ZGL (as % of spot) at which to fire
+    # APPROACHING_ZGL alert. E.g. 0.5 = alert when spot is within 0.5% of ZGL.
+    ZGL_PROXIMITY_PCT: float = 0.5
 
     # -- Confidence
     # Bucket 4: Historical Performance gate.
