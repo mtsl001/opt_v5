@@ -120,11 +120,24 @@ def get_strikes(
         # needed and no silent value-shift bugs.
         cols = [d[0] for d in result.description]
         rows = result.fetchall()
-        return [
+        
+        rows_out = [
             {k: (round(v, 4) if isinstance(v, float) else v)
              for k, v in zip(cols, r)}
             for r in rows
         ]
+        
+        # Add direction alignment flag for frontend visual cues.
+        # direction_aligned = True when the option side matches the requested direction.
+        # When direction=None, all rows default to True (no filtering context).
+        if direction:
+            for row_dict in rows_out:
+                row_dict["direction_aligned"] = (row_dict.get("option_type") == direction)
+        else:
+            for row_dict in rows_out:
+                row_dict["direction_aligned"] = True
+
+        return rows_out
     except Exception as e:
         logger.warning("get_strikes error: {}", e)
         return []

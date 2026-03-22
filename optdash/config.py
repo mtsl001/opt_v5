@@ -392,6 +392,18 @@ class Settings(BaseSettings):
     PCR_DIV_BULL_THRESHOLD: float = 0.25
     PCR_DIV_BEAR_THRESHOLD: float = -0.20
 
+    # PCR Z-score signal thresholds.
+    # Z-score = (current_div - rolling_mean) / rolling_std
+    # over PCR_ZSCORE_WINDOW snaps (default 20).
+    #
+    # PCR_Z_PANIC_THRESHOLD:     |Z| > this -> RETAIL_PANIC_PUTS / RETAIL_PANIC_CALLS
+    # PCR_Z_BUILDING_THRESHOLD:  |Z| > this -> DIVERGENCE_BUILDING (weaker signal)
+    # PCR_Z_FADING_TREND:        div_trend magnitude to trigger DIVERGENCE_FADING override.
+    #   Positive value: when puts-panic but div is falling by this much, signal softens.
+    PCR_Z_PANIC_THRESHOLD:    float = 1.5
+    PCR_Z_BUILDING_THRESHOLD: float = 0.8
+    PCR_Z_FADING_TREND:       float = 0.05
+
     # Rolling Z-score window for PCR divergence normalization (PCR-3).
     # Unit: number of intraday snaps. At 1-min cadence: 30 snaps = 30-min rolling window.
     # Increase for smoother Z-score; decrease for more reactive signal.
@@ -455,6 +467,17 @@ class Settings(BaseSettings):
     # Current RBI repo rate: 6.25% as of Mar 2026.
     # Override in .env: RISK_FREE_RATE=0.0650
     RISK_FREE_RATE: float = 0.0625
+
+    # Skew = 25D Put IV - 25D Call IV (in IV %)
+    # Typical NIFTY skew range: 2-6%. Above 6% = elevated fear premium.
+    # SKEW_ELEVATED_THRESHOLD: above this, put-skew is considered "elevated".
+    # Used in SkewxVEX convergence alert (B-2).
+    SKEW_ELEVATED_THRESHOLD: float = 5.0
+
+    # SKEW_STEEPENING_VEX_CONFIRM: when skew is STEEPENING and VEX < -threshold,
+    # this triggers HIGH_CONVICTION_BEAR alert.
+    # These two signals together confirm vanna-accelerated selling pressure.
+    SKEW_STEEPENING_VEX_CONFIRM: bool = True
     # IV crush HIGH severity Vega threshold -- per underlying.
     # Unit: option price points per 1% IV change (confirmed from screener
     # normalisation: vega / ltp / 0.50). NOT raw BSM decimal Vega.
@@ -554,6 +577,24 @@ class Settings(BaseSettings):
     # Override via TRAILING_STOP_TRAIL_PCT= in .env for strategy tuning.
     TRAILING_STOP_TRAIL_PCT:    float = 0.10
     GATE_SUSTAINED_NO_GO_SNAPS: int   = 2
+
+    # ZGL_PROXIMITY_PCT: distance from ZGL (as % of spot) at which to fire
+    # APPROACHING_ZGL alert. E.g. 0.5 = alert when spot is within 0.5% of ZGL.
+    ZGL_PROXIMITY_PCT: float = 0.5
+
+    # -- Confidence
+    # Bucket 4: Historical Performance gate.
+    # Minimum number of closed trades required before win_rate is trusted.
+    # Below this threshold, B4 = 0 (cold-start protection).
+    CONFIDENCE_B4_MIN_TRADES: int = 5
+
+    # Bucket 4 max raw points (before min() cap).
+    # Keep in sync with Bucket 4 cap in compute_confidence().
+    # Formula: b4 = min(CONFIDENCE_B4_MAX, int(win_rate * CONFIDENCE_B4_SCALE))
+    # At 100% win rate: int(1.0 * 12) = 12, capped to 10 = max pts.
+    # At 83.3% win rate: int(0.833 * 12) = 9 pts.
+    CONFIDENCE_B4_MAX:   int = 10
+    CONFIDENCE_B4_SCALE: int = 12   # denominator ceiling; keep at 1.2× B4_MAX
 
     SESSION_MIDDAY_CONFIDENCE_PENALTY: int = 10
     SESSION_CLOSING_CONFIDENCE_CAP:    int = 60

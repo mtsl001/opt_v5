@@ -1,676 +1,853 @@
-# OptDash — VEX/CEX & IV Analytics Fix Plan: Part A
+# OptDash — VEX/CEX & IV Analytics Fix Plan: Part B
 
-**Target modules:** `vex_cex.py` · `iv.py` · `processor.py` · `config.py` · `ai/confidence.py`  
-**Release:** v2.5.x → v2.6.0  
-**Branch to create:** `fix/vex-iv-analytics-part-a`
+**Target modules:** `ai/confidence.py` · `analytics/screener.py` · `analytics/pcr.py` · `analytics/vex_cex.py` · `analytics/iv.py` · `config.py`  
+**Release:** v2.6.0 → v2.6.1  
+**Branch to create:** `fix/analytics-part-b`  
 
 > **For the junior developer:**  
-> Every issue below tells you (a) what is currently wrong and where,  
-> (b) the exact replacement code, and (c) the correct commit message.  
-> Follow the commit order in the Summary Table at the end.  
-> Do NOT touch any file not listed in an issue. Run tests after each commit.
+> Part B covers the remaining open issues from the consolidated review.  
+> Every section gives you the exact current code (from the live repo), the precise  
+> replacement, and the commit message. Follow the Commit Order table at the end.  
+> Do NOT touch any file not listed in an issue.
 
 ---
 
 ## Pre-Flight Checklist
 
-```bash
-git pull origin main
-git checkout -b fix/vex-iv-analytics-part-a
-# Confirm baseline
+# Create Part B branch
+git checkout -b fix/analytics-part-b
+
+# Sanity check — these should all exist after Part A
+python -c "from optdash.config import settings; print(settings.RISK_FREE_RATE)"
 python -c "from optdash.config import settings; print(settings.VRP_OVERPRICED_THRESHOLD)"
 ```
 
 ---
 """)
 
-# ---- IV-OPEN-1
-sections.append("""## Issue IV-OPEN-1 — `vrp_regime` and VIX gate thresholds not in config
+# ---------- ISSUE B-1: VEX-6 per-strike VEX/CEX viz ----------
+sections.append("""## Issue B-1 (VEX-6) — Per-Strike VEX/CEX Data Already Exists, Missing from API Route
 
-**Severity:** Medium | **File:** `optdash/config.py`
+**Severity:** Low  
+**File:** `optdash/api/routes/vex_cex_router.py` (or wherever API routes live)  
+**Note:** `_get_by_strike()` in `vex_cex.py` already computes per-strike VEX/CEX and  
+`get_vex_cex_full()` already returns `by_strike` in its response payload.  
+The data EXISTS — it is just not exposed as a dedicated endpoint.
 
-### What is wrong
+### Verify it is wired up
 
-`iv.py` already uses `settings.VRP_OVERPRICED_THRESHOLD`, `settings.VRP_UNDERPRICED_THRESHOLD`,
-`settings.VIX_HIGH_THRESHOLD`, and `settings.VIX_HIGH_IVP_THRESHOLD`. But these constants
-have no comments in `config.py`, making them impossible to tune safely via `.env`.
-
-### Fix
-
-Find the `# -- IV` section in `config.py` (near `IV_LOOKBACK_DAYS`).  
-Add or update the following block immediately below `IV_LOOKBACK_DAYS`:
+Open the FastAPI router file (search for `vex` in the `api/routes/` folder).  
+Look for a route like:
 
 ```python
-# VRP = ATM_IV - HV20  (both in %, e.g. IV=18.5, HV20=14.2 → VRP=+4.3)
-# OVERPRICED  (VRP > +2.0): options expensive vs realised vol — sellers edge.
-#             Buyers should require stronger signal confirmation.
-# UNDERPRICED (VRP <  0.0): options cheaper than realised vol — buyers edge.
-#             Mathematical edge for option buying is highest here.
-# FAIR        (0.0 ≤ VRP ≤ 2.0): normal conditions.
-VRP_OVERPRICED_THRESHOLD:  float = 2.0
-VRP_UNDERPRICED_THRESHOLD: float = 0.0
-
-# India VIX gate parameters
-# VIX_HIGH_THRESHOLD:     VIX above this tightens Gate C5 IVP requirement.
-# VIX_HIGH_IVP_THRESHOLD: In high-VIX regime, IVP must be < 35 (not < 50)
-#                         to score the "IV cheap" gate point.
-VIX_HIGH_THRESHOLD:     float = 20.0
-VIX_HIGH_IVP_THRESHOLD: float = 35.0
+@router.get("/vex-cex/full")
+async def vex_cex_full(...):
+    return get_vex_cex_full(conn, trade_date, snap_time, underlying)
 ```
 
-Add this validator inside the `Settings` class after the VRP fields:
+If this route exists and `by_strike` is in the response, **this issue is already resolved**.  
+Check by calling: `GET /api/vex-cex/full?underlying=NIFTY&...` and confirming `by_strike` is present.
+
+### Fix — Only if `by_strike` endpoint is missing
+
+If there is no dedicated per-strike endpoint, add one to the router:
 
 ```python
-@field_validator("VRP_UNDERPRICED_THRESHOLD")
-@classmethod
-def _check_vrp_thresholds(cls, v: float, info) -> float:
-    overpriced = (info.data or {}).get("VRP_OVERPRICED_THRESHOLD", 2.0)
-    if v >= overpriced:
-        raise ValueError(
-            f"VRP_UNDERPRICED_THRESHOLD={v} must be < VRP_OVERPRICED_THRESHOLD={overpriced}."
-        )
-    return v
-```
-
-### Commit message
-
-```
-fix(config): expose VRP and VIX gate thresholds as named config constants (IV-OPEN-1)
-```
-
----
-""")
-
-# ---- IV-OPEN-2
-sections.append("""## Issue IV-OPEN-2 — VRP not wired into Confidence Score
-
-**Severity:** Medium | **File:** `optdash/ai/confidence.py`  
-**Depends on:** IV-OPEN-1 (config constants must exist first)
-
-### What is wrong
-
-`iv.py` computes `vrp_regime` but the Confidence Score Structural Quality bucket (max 25 pts)
-ignores it entirely. When `vrp_regime = "UNDERPRICED"`, options are mathematically cheap
-for buyers — this is the highest-conviction entry context and should boost confidence.
-
-### Find the Structural Quality bucket
-
-Look in `confidence.py` for code awarding points for IVP, Contango, S_Score, GEX, VEX.
-It looks roughly like:
-
-```python
-sq = 0
-if ivp is not None and ivp < 50:
-    sq += 6
-if shape == "CONTANGO":
-    sq += 4
-if s_score > 80:
-    sq += 7
-if gex_declining:
-    sq += 5
-if vex_aligned:
-    sq += 3
-structural_quality = min(25, sq)
-```
-
-### Fix
-
-After the `vex_aligned` block, add:
-
-```python
-# VRP bonus (+3): when VRP < 0, options are genuinely underpriced vs realised vol.
-# This is the statistically strongest entry context for option buyers.
-# Source: iv_data["vrp_regime"] from get_ivr_ivp().
-vrp_regime = iv_data.get("vrp_regime", "UNKNOWN")
-if vrp_regime == "UNDERPRICED":
-    sq += 3
-# Note: min(25, sq) cap below handles overflow — no change to cap line needed.
-```
-
-**Check the function signature** of `compute_confidence()`. It must receive `iv_data` as a
-parameter. If it doesn't:
-1. Add `iv_data: dict` to the signature.
-2. Find where `compute_confidence()` is called (likely in `scheduler.py` or `recommender.py`)
-   and pass `iv_data` from the `get_ivr_ivp()` result already fetched there.
-
-### Commit message
-
-```
-feat(confidence): add VRP_UNDERPRICED bonus to structural quality bucket +3 pts (IV-OPEN-2)
-```
-
----
-""")
-
-# ---- VEX-3
-sections.append("""## Issue VEX-3 — Clip trigger rate is invisible (hides data quality problems)
-
-**Severity:** Medium | **File:** `optdash/processor.py`
-
-### What is wrong
-
-`VANNA_CLIP = CHARM_CLIP = 50.0` silently truncates extreme vanna/charm values.
-If 20-30% of rows are being clipped, it means near-zero IV rows in the upstream BQ feed
-are corrupting the computation. There is currently no way to detect this.
-
-### Fix
-
-In `processor.py`, find the function that computes vanna/charm per row (likely `_compute_gex_vex_cex`
-or the main enrichment loop). Add counters before the loop and a warning check after:
-
-```python
-# --- Before the row-processing loop ---
-clip_count_vanna = 0
-clip_count_charm = 0
-total_opt_rows   = 0
-
-# --- Inside the loop, after computing raw vanna (BEFORE applying clip) ---
-# (raw_vanna is the value before max(-CLIP, min(CLIP, ...)) )
-if abs(raw_vanna) > settings.VANNA_CLIP:
-    clip_count_vanna += 1
-vanna = max(-settings.VANNA_CLIP, min(settings.VANNA_CLIP, raw_vanna))
-
-if abs(raw_charm) > settings.CHARM_CLIP:
-    clip_count_charm += 1
-charm = max(-settings.CHARM_CLIP, min(settings.CHARM_CLIP, raw_charm))
-
-total_opt_rows += 1
-
-# --- After the loop ---
-if total_opt_rows > 0:
-    vanna_rate = clip_count_vanna / total_opt_rows
-    charm_rate = clip_count_charm / total_opt_rows
-    if vanna_rate > 0.05:
-        logger.warning(
-            "HIGH VANNA CLIP RATE {:.1%} ({}/{} rows) for {}. "
-            "Check for near-zero IV rows in BQ feed.",
-            vanna_rate, clip_count_vanna, total_opt_rows, underlying
-        )
-    if charm_rate > 0.05:
-        logger.warning(
-            "HIGH CHARM CLIP RATE {:.1%} ({}/{} rows) for {}. "
-            "Check for near-zero IV rows in BQ feed.",
-            charm_rate, clip_count_charm, total_opt_rows, underlying
-        )
-```
-
-### Commit message
-
-```
-feat(processor): add clip-rate monitoring for vanna/charm noise filter (VEX-3)
-
-Logs WARNING when >5% of rows hit VANNA_CLIP or CHARM_CLIP per snap.
-Surfaces upstream data quality problems that were previously silent.
-```
-
----
-""")
-
-# ---- VEX-4
-sections.append("""## Issue VEX-4 — BANKNIFTY VEX threshold identical to NIFTY despite lower notional/lot
-
-**Severity:** Medium | **File:** `optdash/config.py`
-
-### What is wrong
-
-```python
-VEX_THRESHOLDS = {"NIFTY": 0.50, "BANKNIFTY": 0.50, ...}
-```
-
-VEX formula: `OI × lot_size × vanna × spot / 1e6`  
-Notional multiplier = spot × lot_size:
-- NIFTY: 24000 × 75 = **1,800,000** per lot
-- BANKNIFTY: 52000 × 15 = **780,000** per lot  
-
-BANKNIFTY's notional per lot is ~43% of NIFTY. The same absolute ₹M threshold
-is proportionally harder for BANKNIFTY to cross — VEX signals are under-triggering.
-
-### Fix
-
-In `config.py`, update `VEX_THRESHOLDS`:
-
-```python
-VEX_THRESHOLDS: dict[str, float] = {
-    # Threshold = minimum |VEX| in Rs M to classify as VEX_BULLISH/BEARISH.
-    # Calibration (Mar 2026) based on notional-per-lot = spot × lot_size:
-    #   NIFTY:       ~24000 × 75  = 1.80M  → 0.50 (high notional, strong signal)
-    #   BANKNIFTY:   ~52000 × 15  = 0.78M  → 0.35 (lower notional per lot;
-    #                                               threshold reduced proportionally)
-    #   FINNIFTY:    ~25000 × 40  = 1.00M  → 0.25 (smaller OI base)
-    #   MIDCPNIFTY:  ~12000 × 120 = 1.44M  → 0.15 (thin liquidity)
-    #   NIFTYNXT50:  ~80000 × 10  = 0.80M  → 0.15 (very thin OI)
-    # Review after 30 live trading days.
-    "NIFTY":      0.50,
-    "BANKNIFTY":  0.35,   # was 0.50
-    "FINNIFTY":   0.25,
-    "MIDCPNIFTY": 0.15,
-    "NIFTYNXT50": 0.15,
-}
-```
-
-### Commit message
-
-```
-fix(config): recalibrate BANKNIFTY VEX threshold 0.50→0.35 with notional docs (VEX-4)
-```
-
----
-""")
-
-# ---- VEX-5
-sections.append("""## Issue VEX-5 — CEX charm direction ignores GEX sign (directional logic is wrong)
-
-**Severity:** Medium | **Files:** `optdash/analytics/vex_cex.py`
-
-### What is wrong
-
-`_interpret()` labels `STRONG_CHARM_BID` as bullish regardless of dealer positioning.
-
-**The truth:**
-- If `net_GEX > 0` (dealers net LONG options): charm decay forces them to **SELL** underlying → bearish drift.
-- If `net_GEX < 0` (dealers net SHORT options): charm decay forces them to **BUY** underlying → bullish support.
-
-### Fix
-
-**Step 1:** Add import at top of `vex_cex.py`:
-
-```python
-from optdash.analytics.gex import get_net_gex
-```
-
-> Before adding this, open `gex.py` and check its imports — confirm it does NOT import
-> anything from `vex_cex.py`. If it does, skip this import and use the alternative below.
-
-**Step 2:** In `get_vex_cex_current()`, after fetching the VEX/CEX row from DuckDB, add:
-
-```python
-# Fetch net GEX sign to determine charm hedging direction (VEX-5)
-gex_data = get_net_gex(conn, trade_date, snap_time, underlying)
-net_gex   = gex_data.get("gex_all_B", 0.0)
-```
-
-**Step 3:** In `get_vex_cex_current()`, update the `_interpret()` call:
-
-```python
-# Change:
-interp = _interpret(vex_signal, cex_signal, dealer_oc)
-# To:
-interp = _interpret(vex_signal, cex_signal, dealer_oc, net_gex)
-```
-
-Also add `net_gex` to the returned dict:
-
-```python
-return {
-    ...
-    "net_gex_B":    round(net_gex, 3),   # add this line
-    "interpretation": interp,
-}
-```
-
-**Step 4:** Replace the `_interpret()` function entirely:
-
-```python
-def _interpret(vex_signal: str, cex_signal: str,
-               dealer_oc: bool, net_gex: float = 0.0) -> str:
+@router.get("/vex-cex/by-strike")
+async def vex_cex_by_strike(
+    underlying: str,
+    trade_date: str,
+    snap_time:  str,
+    conn = Depends(get_db_conn),
+):
     \"\"\"
-    Human-readable VEX/CEX signal interpretation.
-    CEX direction is GEX-conditional:
-      net_gex > 0 → dealers long options → charm forces them to SELL (bearish)
-      net_gex < 0 → dealers short options → charm forces them to BUY (bullish)
+    Per-strike VEX and CEX breakdown for frontend heatmap rendering.
+    Returns list of {strike_price, option_type, moneyness_pct, vex_M, cex_M, oi, iv, dte}.
+    Sorted by strike_price ascending.
     \"\"\"
-    if dealer_oc:
-        if cex_signal in (CexSignal.STRONG_CHARM_BID.value, CexSignal.CHARM_BID.value):
-            if net_gex < 0:
-                return ("Dealer O'Clock ACTIVE — GEX negative, charm forces dealer "
-                        "BUYING. Bullish pinning/squeeze likely into expiry.")
-            return ("Dealer O'Clock ACTIVE — GEX positive, charm forces dealer "
-                    "SELLING. Bearish drift / pin below likely.")
-        return "Dealer O'Clock active — charm flows dominate expiry day mechanics."
-
-    if vex_signal == VexSignal.VEX_BULLISH.value:
-        return "IV drop forces dealer buying — bullish mechanical bias."
-    if vex_signal == VexSignal.VEX_BEARISH.value:
-        return "IV rise forces dealer selling — bearish mechanical pressure."
-
-    if cex_signal == CexSignal.STRONG_CHARM_BID.value:
-        if net_gex < 0:
-            return ("Strong charm: dealers short options → buying underlying "
-                    "for delta hedge → bullish support.")
-        return ("Strong charm: dealers long options → selling underlying "
-                "for delta hedge → mild bearish drift.")
-    if cex_signal == CexSignal.CHARM_BID.value:
-        return "Charm bid building — monitor for directional confirmation."
-    if cex_signal == CexSignal.CHARM_PRESSURE.value:
-        return "Charm pressure — delta hedging adding supply."
-    return "No dominant dealer flow signal."
+    from optdash.analytics.vex_cex import _get_by_strike
+    return _get_by_strike(conn, trade_date, snap_time, underlying)
 ```
 
-**Step 5:** In `_get_vex_cex_series()`, update `_interpret()` call to pass neutral fallback:
-
-```python
-# Change:
-"interpretation": _interpret(vex_sig, cex_sig, dealer_oc),
-# To:
-"interpretation": _interpret(vex_sig, cex_sig, dealer_oc, net_gex=0.0),
-```
-
-**Alternative if circular import:** If `gex.py` imports from `vex_cex.py`, do NOT add the gex
-import. Instead, have `environment.py` pass `net_gex` down to `get_vex_cex_current()` as a
-parameter, since `environment.py` already calls `get_net_gex()` independently.
+**Note:** `_get_by_strike` is already imported and returns the correct schema  
+with `moneyness_pct` None-safe (the NULL NULLIF fix is already in the live code).
 
 ### Commit message
 
 ```
-fix(vex_cex): make CEX charm direction conditional on GEX sign (VEX-5)
+feat(api): expose per-strike VEX/CEX as dedicated endpoint /vex-cex/by-strike (VEX-6)
 
-Charm-driven delta-hedging direction flips based on whether dealers are
-net long (GEX>0 → sell underlying) or net short (GEX<0 → buy underlying).
-_interpret() now accepts net_gex float. Series path uses 0.0 fallback.
+Data was already computed by _get_by_strike() in vex_cex.py and included
+in the /vex-cex/full response. Added dedicated route for frontend heatmap
+rendering without requiring the full payload.
 ```
 
 ---
 """)
 
-# ---- VEX-1 and VEX-2 combined
-sections.append("""## Issues VEX-1 + VEX-2 — Exact BSM Vanna and Charm (commit together)
+# ---------- ISSUE B-2: VEX-7 Skew x VEX convergence alert ----------
+sections.append("""## Issue B-2 (VEX-7) — Skew × VEX Convergence Alert is Absent
 
-**Severity:** HIGH | **Files:** `optdash/processor.py`, `optdash/config.py`  
-**⚠️ Parquet breaking change — backfill required after deploy**
+**Severity:** Low  
+**Files:** `optdash/analytics/iv.py`, `optdash/analytics/alerts.py`, `optdash/config.py`
 
----
+### What is wrong
 
-### VEX-1: Vanna approximation formula is wrong for OTM strikes
+When the 25-Delta put IV minus 25-Delta call IV (put skew) steepens **simultaneously** with  
+`VEX < -threshold` (bearish vanna pressure), it is a high-conviction downside signal.  
+This composite alert does not currently exist anywhere in the codebase.
 
-**Current code in processor.py:**
+### Step 1 — Add a skew computation function to `iv.py`
 
-```python
-sigma  = iv / 100
-sqrt_t = math.sqrt(dte / 365)
-vanna  = delta * (1 - abs(delta)) / (spot * sigma * sqrt_t)
-vanna  = max(-settings.VANNA_CLIP, min(settings.VANNA_CLIP, vanna))
-```
-
-**Problem:** `δ × (1-|δ|)` mimics vanna's ATM peak but diverges significantly for OTM options
-(delta 0.10–0.30) where retail clustering occurs.  
-**True BSM vanna:**
-
-```
-Vanna = -(Vega_BSM × d2) / (Spot × σ × √T)
-where d1 = [ln(S/K) + (r + 0.5σ²)T] / (σ√T)
-      d2 = d1 - σ√T
-      Vega_BSM = S × N'(d1) × √T
-```
-
----
-
-### VEX-2: Charm approximation conflates theta with delta time-sensitivity
-
-**Current code in processor.py:**
+At the bottom of `iv.py`, add this new function:
 
 ```python
-charm = -theta / (spot * sigma * sqrt_t)
-charm = max(-settings.CHARM_CLIP, min(settings.CHARM_CLIP, charm))
-```
-
-**Problem:** Theta and charm are related near-ATM but diverge strongly for ITM/OTM options.  
-For ITM options: theta is large, charm is small. For OTM near expiry: charm accelerates while
-theta is small. CEX readings for the strikes you want to trade are systematically wrong.  
-**True BSM charm:**
-
-```
-Charm = -N'(d1) × [2rT - d2 × σ√T] / [2T × σ√T]
-```
-
----
-
-### Fix — Step 1: Add `RISK_FREE_RATE` to `config.py`
-
-In the `# -- IV` section, add:
-
-```python
-# Risk-free rate for exact BSM Greek computation.
-# Use RBI repo rate (annualised decimal). Update when RBI changes policy rate.
-# Current RBI repo rate: 6.25% as of Mar 2026.
-# Override in .env: RISK_FREE_RATE=0.0650
-RISK_FREE_RATE: float = 0.0625
-```
-
----
-
-### Fix — Step 2: Add helper functions in `processor.py`
-
-At the top of `processor.py`, add this import if not already present:
-
-```python
-from scipy.stats import norm   # add to requirements.txt if scipy not present
-```
-
-Then add these two helper functions (add near the top of the file, outside any class):
-
-```python
-import math
-from scipy.stats import norm
-
-def _bsm_d1_d2(
-    spot: float, strike: float, sigma: float, t: float, r: float
-) -> tuple[float | None, float | None]:
+def get_iv_skew(
+    conn:       duckdb.DuckDBPyConnection,
+    trade_date: str,
+    snap_time:  str,
+    underlying: str,
+) -> dict:
     \"\"\"
-    Compute BSM d1 and d2.
-    Returns (None, None) on invalid inputs to prevent downstream errors.
-    All inputs must be strictly positive (spot, strike, sigma, t > 0).
+    Compute 25-delta put/call IV skew for TIER1 options.
+
+    Skew = IV of the strike closest to 25-delta PUT minus
+           IV of the strike closest to 25-delta CALL.
+
+    Positive skew: put wing more expensive than call wing (normal for indices).
+    Rising skew: fear increasing, put demand accelerating.
+    This is the standard skew measure used by dealers and vol desks.
+
+    Returns:
+        skew:           float — current skew value (in IV %)
+        put_25d_iv:     float — IV of nearest 25-delta put strike
+        call_25d_iv:    float — IV of nearest 25-delta call strike
+        skew_direction: str   — \"STEEPENING\" / \"FLATTENING\" / \"FLAT\" / \"UNKNOWN\"
+        skew_regime:    str   — \"ELEVATED\" (> threshold) / \"NORMAL\" / \"UNKNOWN\"
     \"\"\"
-    if spot <= 0 or strike <= 0 or sigma <= 0 or t <= 0:
-        return None, None
     try:
-        d1 = (math.log(spot / strike) + (r + 0.5 * sigma ** 2) * t) / (sigma * math.sqrt(t))
-        d2 = d1 - sigma * math.sqrt(t)
-        return d1, d2
-    except (ValueError, ZeroDivisionError):
-        return None, None
+        # Find nearest-to-0.25-delta strikes for CE and PE
+        row = conn.execute(\"\"\"
+            WITH t1 AS (
+                SELECT option_type, strike_price, iv, delta
+                FROM options_data
+                WHERE trade_date=? AND snap_time=? AND underlying=?
+                  AND expiry_tier='TIER1' AND iv > 0
+            ),
+            puts AS (
+                SELECT iv, delta, strike_price
+                FROM t1
+                WHERE option_type='PE'
+                ORDER BY ABS(ABS(delta) - 0.25)
+                LIMIT 1
+            ),
+            calls AS (
+                SELECT iv, delta, strike_price
+                FROM t1
+                WHERE option_type='CE'
+                ORDER BY ABS(ABS(delta) - 0.25)
+                LIMIT 1
+            )
+            SELECT p.iv AS put_iv, c.iv AS call_iv
+            FROM puts p, calls c
+        \"\"\", [trade_date, snap_time, underlying]).fetchone()
 
+        if not row or row[0] is None or row[1] is None:
+            return {"skew": None, "put_25d_iv": None, "call_25d_iv": None,
+                    "skew_direction": "UNKNOWN", "skew_regime": "UNKNOWN"}
 
-def _compute_exact_vanna(
-    spot: float, strike: float, sigma: float, t: float, r: float,
-    vanna_clip: float
-) -> float:
-    \"\"\"
-    Exact BSM Vanna = -(Vega_BSM × d2) / (Spot × σ × √T)
+        put_iv  = float(row[0])
+        call_iv = float(row[1])
+        skew    = round(put_iv - call_iv, 2)
 
-    Vanna measures how delta changes as implied volatility changes.
-    Positive vanna: delta increases as IV rises (call) or delta decreases as
-    IV drops (put). For a dealer short options, rising IV forces delta hedging.
-    \"\"\"
-    d1, d2 = _bsm_d1_d2(spot, strike, sigma, t, r)
-    if d1 is None:
-        return 0.0
-    sqrt_t   = math.sqrt(t)
-    vega_bsm = spot * norm.pdf(d1) * sqrt_t      # S × N'(d1) × √T
-    denom    = spot * sigma * sqrt_t
-    if abs(denom) < 1e-10:
-        return 0.0
-    vanna = -(vega_bsm * d2) / denom
-    return float(max(-vanna_clip, min(vanna_clip, vanna)))
+        # Trailing skew trend: compare to skew 3 snaps ago
+        prev_row = conn.execute(\"\"\"
+            WITH ordered AS (
+                SELECT snap_time
+                FROM options_data
+                WHERE trade_date=? AND underlying=? AND snap_time < ?
+                GROUP BY snap_time
+                ORDER BY snap_time DESC
+                LIMIT 3
+            ),
+            oldest AS (SELECT MIN(snap_time) AS st FROM ordered),
+            puts AS (
+                SELECT o.iv
+                FROM options_data o, oldest old_s
+                WHERE o.trade_date=? AND o.snap_time=old_s.st
+                  AND o.underlying=? AND o.expiry_tier='TIER1'
+                  AND o.option_type='PE' AND o.iv > 0
+                ORDER BY ABS(ABS(o.delta) - 0.25) LIMIT 1
+            ),
+            calls AS (
+                SELECT o.iv
+                FROM options_data o, oldest old_s
+                WHERE o.trade_date=? AND o.snap_time=old_s.st
+                  AND o.underlying=? AND o.expiry_tier='TIER1'
+                  AND o.option_type='CE' AND o.iv > 0
+                ORDER BY ABS(ABS(o.delta) - 0.25) LIMIT 1
+            )
+            SELECT p.iv, c.iv FROM puts p, calls c
+        \"\"\", [trade_date, underlying, snap_time,
+                trade_date, underlying,
+                trade_date, underlying]).fetchone()
 
+        skew_direction = "UNKNOWN"
+        if prev_row and prev_row[0] is not None and prev_row[1] is not None:
+            prev_skew = float(prev_row[0]) - float(prev_row[1])
+            delta_skew = skew - prev_skew
+            if delta_skew > 0.3:
+                skew_direction = "STEEPENING"
+            elif delta_skew < -0.3:
+                skew_direction = "FLATTENING"
+            else:
+                skew_direction = "FLAT"
 
-def _compute_exact_charm(
-    spot: float, strike: float, sigma: float, t: float, r: float,
-    charm_clip: float
-) -> float:
-    \"\"\"
-    Exact BSM Charm = -N'(d1) × [2rT - d2 × σ√T] / [2T × σ√T]
+        skew_threshold = settings.SKEW_ELEVATED_THRESHOLD   # add to config (see Step 2)
+        skew_regime = "ELEVATED" if skew > skew_threshold else "NORMAL"
 
-    Charm = dDelta/dTime. Measures how much delta decays per unit of time.
-    On expiry day, charm flow is the primary driver of dealer delta-hedging.
-    Negative charm = delta decays toward 0 as time passes (typical for calls).
-    \"\"\"
-    d1, d2 = _bsm_d1_d2(spot, strike, sigma, t, r)
-    if d1 is None or t <= 0:
-        return 0.0
-    sqrt_t     = math.sqrt(t)
-    numerator  = 2 * r * t - d2 * sigma * sqrt_t
-    denominator = 2 * t * sigma * sqrt_t
-    if abs(denominator) < 1e-10:
-        return 0.0
-    charm = -norm.pdf(d1) * (numerator / denominator)
-    return float(max(-charm_clip, min(charm_clip, charm)))
+        return {
+            "skew":           skew,
+            "put_25d_iv":     round(put_iv, 2),
+            "call_25d_iv":    round(call_iv, 2),
+            "skew_direction": skew_direction,
+            "skew_regime":    skew_regime,
+        }
+    except Exception as e:
+        logger.warning("get_iv_skew error: {}", e)
+        return {"skew": None, "put_25d_iv": None, "call_25d_iv": None,
+                "skew_direction": "UNKNOWN", "skew_regime": "UNKNOWN"}
 ```
 
----
+### Step 2 — Add `SKEW_ELEVATED_THRESHOLD` to `config.py`
 
-### Fix — Step 3: Replace old vanna/charm calls in the row processing loop
-
-Find the existing vanna/charm computation block (look for `delta * (1 - abs(delta))`).
-Replace the entire block with:
+In the `# -- IV` section:
 
 ```python
-# Compute time parameters once per row
-t      = max(row.get("dte", 0), 0) / 365.0
-sigma  = (row.get("iv") or 0.0) / 100.0
-r      = settings.RISK_FREE_RATE
-_spot  = row.get("spot") or 0.0
-_strike = row.get("strike_price") or 0.0
+# Skew = 25D Put IV - 25D Call IV (in IV %)
+# Typical NIFTY skew range: 2-6%. Above 6% = elevated fear premium.
+# SKEW_ELEVATED_THRESHOLD: above this, put-skew is considered "elevated".
+# Used in Skew×VEX convergence alert (B-2).
+SKEW_ELEVATED_THRESHOLD: float = 5.0
 
-# Exact BSM vanna (VEX-1)
-raw_vanna = _compute_exact_vanna(_spot, _strike, sigma, t, r, settings.VANNA_CLIP)
-vanna = raw_vanna  # already clipped inside helper
-
-# Exact BSM charm (VEX-2)
-raw_charm = _compute_exact_charm(_spot, _strike, sigma, t, r, settings.CHARM_CLIP)
-charm = raw_charm  # already clipped inside helper
+# SKEW_STEEPENING_VEX_CONFIRM: when skew is STEEPENING and VEX < -threshold,
+# this triggers HIGH_CONVICTION_BEAR alert.
+# These two signals together confirm vanna-accelerated selling pressure.
+SKEW_STEEPENING_VEX_CONFIRM: bool = True
 ```
 
----
+### Step 3 — Add the composite alert to `alerts.py`
 
-### ⚠️ PARQUET BREAKING CHANGE — Action Required Before Deploying
+Open `alerts.py` and find the section that generates alert objects (look for a list/dict  
+being built with alert names like `"GEX_FLIP"`, `"CHARM_ACTIVE"`, etc.).
 
-The `vanna` and `charm` columns in Parquet change their values after this fix.
-Historical Parquets contain old approximate values. You must choose one option:
+Add a new alert generator function:
 
-**Option A (Recommended — Clean):**
-```bash
-# 1. Stop the scheduler
-# 2. Delete all processed Parquets
-rm -rf data/processed/
-# 3. Reset the watermark
-echo '{}' > data/watermark.json
-# 4. Restart — backfill will regenerate all data with exact Greeks
+```python
+def _check_skew_vex_convergence(
+    skew_data: dict,
+    vex_data:  dict,
+    underlying: str,
+) -> dict | None:
+    \"\"\"
+    HIGH_CONVICTION_BEAR alert fires when:
+      1. Skew is STEEPENING (put-wing demand accelerating)
+      AND
+      2. VEX total is below -threshold (bearish vanna pressure from dealers)
+
+    These two signals together confirm that:
+      a) Market participants are buying puts aggressively (steepening skew)
+      b) Dealers are forced to short the underlying as IV rises (negative VEX)
+    This combination has historically preceded violent, accelerating downside moves.
+    \"\"\"
+    if not settings.SKEW_STEEPENING_VEX_CONFIRM:
+        return None
+
+    skew_direction = skew_data.get("skew_direction", "UNKNOWN")
+    skew_regime    = skew_data.get("skew_regime", "UNKNOWN")
+    vex_total      = vex_data.get("vex_total_M", 0.0)
+    vex_threshold  = settings.VEX_THRESHOLDS.get(underlying, settings.VEX_BULL_THRESHOLD)
+
+    # Both conditions must be true simultaneously
+    skew_steepening = (skew_direction == "STEEPENING")
+    vex_bearish     = (vex_total < -vex_threshold)
+
+    if skew_steepening and vex_bearish:
+        return {
+            "alert_type":  "HIGH_CONVICTION_BEAR",
+            "severity":    "HIGH",
+            "message": (
+                f"Skew steepening ({skew_data.get('skew', 'N/A')}%) + "
+                f"VEX bearish ({round(vex_total, 2)} Rs M) — "
+                f"vanna-accelerated selling pressure confirmed. "
+                f"High-conviction downside setup."
+            ),
+            "skew":       skew_data.get("skew"),
+            "vex_total_M": vex_total,
+        }
+    return None
 ```
 
-**Option B (Acceptable — Gradual):**
-Deploy the code change without deleting Parquets. New snaps will have exact values;
-old snaps will have approximate values. The `DUCK_VIEW_LOOKBACK_DAYS=5` rolling window
-means data fully transitions in 5 trading days. Signal inconsistency exists during transition.
+Then in the main `get_alerts()` function in `alerts.py`, add the call:
 
-**Recommendation: Option A.** Deploy on a non-trading day (weekend).
+```python
+# Import at top if not present:
+from optdash.analytics.iv      import get_iv_skew
+from optdash.analytics.vex_cex import get_vex_cex_current
 
----
+# Inside get_alerts():
+skew_data = get_iv_skew(conn, trade_date, snap_time, underlying)
+vex_data  = get_vex_cex_current(conn, trade_date, snap_time, underlying)
 
-### `requirements.txt` check
-
-Run: `pip show scipy`
-
-If scipy is not installed, add to `requirements.txt`:
-```
-scipy>=1.11
+skew_vex_alert = _check_skew_vex_convergence(skew_data, vex_data, underlying)
+if skew_vex_alert:
+    alerts.append(skew_vex_alert)
 ```
 
----
-
-### Commit message (commit VEX-1 and VEX-2 together)
+### Commit message
 
 ```
-fix(processor): replace approximate vanna+charm with exact BSM formulas (VEX-1, VEX-2)
+feat(iv,alerts): add Skew×VEX convergence HIGH_CONVICTION_BEAR alert (VEX-7)
 
-VEX-1 — Vanna:
-  was:  δ×(1-|δ|) / (S×σ×√T)
-  now:  -(Vega_BSM×d2) / (S×σ×√T)  [exact BSM partial derivative]
-
-VEX-2 — Charm:
-  was:  -θ / (S×σ×√T)
-  now:  -N'(d1)×[2rT-d2σ√T] / [2Tσ√T]  [exact BSM partial derivative]
-
-- Added RISK_FREE_RATE = 0.0625 to config.py (RBI repo rate Mar 2026)
-- Added _bsm_d1_d2(), _compute_exact_vanna(), _compute_exact_charm() helpers
-- Both formulas still clipped at ±VANNA_CLIP / ±CHARM_CLIP (noise safety)
-- scipy.stats.norm required — added to requirements.txt
-- ⚠️ Parquet breaking change: delete data/processed/ + reset watermark before deploy
+- New get_iv_skew() in iv.py: computes 25-delta put/call skew + 3-snap trend
+- New _check_skew_vex_convergence() in alerts.py: fires HIGH_CONVICTION_BEAR
+  when skew STEEPENING AND VEX < -threshold simultaneously
+- Added SKEW_ELEVATED_THRESHOLD=5.0 and SKEW_STEEPENING_VEX_CONFIRM=True to config.py
 ```
 
 ---
 """)
 
-# ---- RELEASE NOTES + SUMMARY
+# ---------- ISSUE B-3: S_Score delta component ----------
+sections.append("""## Issue B-3 — S_Score Delta Component is Asymmetric (CE vs PE scoring)
+
+**Severity:** Medium  
+**File:** `optdash/analytics/screener.py`
+
+### What is wrong
+
+Current S_Score delta term (line in `screener.py`):
+
+```python
+? * ABS(o.delta)   -- W_DELTA coefficient
+```
+
+For a **call (CE)**: delta is positive (0 to +1). `ABS(delta)` = delta. Higher delta = higher score.  
+For a **put (PE)**: delta is negative (-1 to 0). `ABS(delta)` = |delta|. Same scoring — OK.
+
+**However**, the direction filter (`AND o.option_type = ?`) already restricts results to one  
+side when `direction` is passed. The issue is that delta 0.50 = ATM scores highest, and  
+delta 0.10 = deep OTM scores lowest. This is **correct for buyers** — ATM has highest gamma  
+and is the preferred entry for an options buying strategy.
+
+**BUT** the screener cap `SCREENER_MAX_DELTA = 0.50` means the delta term can only reach  
+`W_DELTA × 0.50 = 2.0 × 0.50 = 1.0` as its maximum contribution, capped at half the  
+theoretical max (2.0). The docstring says:  
+`"delta is capped at 0.50 by the SCREENER_MAX_DELTA filter"` — so this is intentional.
+
+**The real problem:** When `direction=None` (both CE and PE returned), a PE with  
+delta = -0.40 and a CE with delta = +0.40 score identically. But if the market context  
+is bearish (VEX bearish, GEX negative), returning CE options with 4-star S_Score in the  
+same list as PE options is misleading — the score does not encode directional alignment.
+
+### Fix — Add a `direction_bonus` column to the S_Score output
+
+Do NOT change the S_Score formula itself (risk of breaking existing star thresholds).  
+Instead, add a `direction_alignment` field to the returned row that the frontend can use  
+for visual flagging:
+
+In `get_strikes()`, after the `return [...]` list comprehension, add a post-processing step:
+
+```python
+rows_out = [
+    {k: (round(v, 4) if isinstance(v, float) else v)
+     for k, v in zip(cols, r)}
+    for r in rows
+]
+
+# Add direction alignment flag for frontend visual cues.
+# direction_aligned = True when the option side matches the requested direction.
+# When direction=None, all rows default to True (no filtering context).
+if direction:
+    for row_dict in rows_out:
+        row_dict["direction_aligned"] = (row_dict.get("option_type") == direction)
+else:
+    for row_dict in rows_out:
+        row_dict["direction_aligned"] = True
+
+return rows_out
+```
+
+This gives the frontend a clean boolean to show/grey-out misaligned options  
+without changing the numeric S_Score or breaking existing threshold calibrations.
+
+### Commit message
+
+```
+feat(screener): add direction_aligned flag to S_Score output rows (B-3)
+
+When direction='CE' or 'PE', marks each row with direction_aligned=True/False
+so the frontend can visually flag options that match the trade direction.
+S_Score formula and star thresholds are unchanged.
+```
+
+---
+""")
+
+# ---------- ISSUE B-4: PCR Z-score window not in config ----------
+sections.append("""## Issue B-4 — PCR Z-score Constants are Config-Exposed but Need Review
+
+**Severity:** Low (documentation + one logic gap)  
+**File:** `optdash/analytics/pcr.py`, `optdash/config.py`
+
+### What is well-implemented (do NOT change)
+
+Looking at the live `pcr.py`:
+- `_trailing_pcr_metrics()` computes rolling mean/std over `PCR_ZSCORE_WINDOW` snaps ✅
+- `_pcr_signal_z()` uses Z > 1.5 / Z < -1.5 for panic signals, falls back to absolute thresholds when window is not filled ✅
+- `div_trend` (LAG-based momentum) correctly softens panic signals on reversion (`DIVERGENCE_FADING`) ✅
+- `get_pcr_series()` uses SQL window functions for the series path ✅
+
+### What is missing — Z-score threshold not in config
+
+`_pcr_signal_z()` has **hardcoded Z thresholds**:
+
+```python
+# Current hardcoded values in pcr.py — lines inside _pcr_signal_z():
+if z > 1.5:
+    signal = "RETAIL_PANIC_PUTS"
+elif z < -1.5:
+    signal = "RETAIL_PANIC_CALLS"
+elif abs(z) > 0.8:
+    signal = "DIVERGENCE_BUILDING"
+```
+
+And the divergence fading thresholds:
+
+```python
+if signal == "RETAIL_PANIC_PUTS" and div_trend < -0.05:
+    signal = "DIVERGENCE_FADING"
+elif signal == "RETAIL_PANIC_CALLS" and div_trend > 0.05:
+    signal = "DIVERGENCE_FADING"
+```
+
+These 4 values cannot be tuned without editing source code.
+
+### Fix — Add Z-score signal thresholds to `config.py`
+
+In the `# -- PCR` section:
+
+```python
+# PCR Z-score signal thresholds.
+# Z-score = (current_div - rolling_mean) / rolling_std
+# over PCR_ZSCORE_WINDOW snaps (default 20).
+#
+# PCR_Z_PANIC_THRESHOLD:     |Z| > this → RETAIL_PANIC_PUTS / RETAIL_PANIC_CALLS
+# PCR_Z_BUILDING_THRESHOLD:  |Z| > this → DIVERGENCE_BUILDING (weaker signal)
+# PCR_Z_FADING_TREND:        div_trend magnitude to trigger DIVERGENCE_FADING override.
+#   Positive value: when puts-panic but div is falling by this much, signal softens.
+PCR_Z_PANIC_THRESHOLD:    float = 1.5
+PCR_Z_BUILDING_THRESHOLD: float = 0.8
+PCR_Z_FADING_TREND:       float = 0.05
+```
+
+### Fix — Replace hardcoded values in `pcr.py`
+
+In `_pcr_signal_z()`, replace the hardcoded literals:
+
+```python
+def _pcr_signal_z(div: float, z: float, snap_count: int, div_trend: float) -> str:
+    signal = "BALANCED"
+    if snap_count >= settings.PCR_ZSCORE_WINDOW:
+        if z > settings.PCR_Z_PANIC_THRESHOLD:
+            signal = "RETAIL_PANIC_PUTS"
+        elif z < -settings.PCR_Z_PANIC_THRESHOLD:
+            signal = "RETAIL_PANIC_CALLS"
+        elif abs(z) > settings.PCR_Z_BUILDING_THRESHOLD:
+            signal = "DIVERGENCE_BUILDING"
+    else:
+        # Fallback to absolute thresholds before window is filled
+        if div > settings.PCR_DIV_BULL_THRESHOLD:
+            signal = "RETAIL_PANIC_PUTS"
+        elif div < settings.PCR_DIV_BEAR_THRESHOLD:
+            signal = "RETAIL_PANIC_CALLS"
+        elif abs(div) > 0.10:
+            signal = "DIVERGENCE_BUILDING"
+
+    # Reversion softener
+    if signal == "RETAIL_PANIC_PUTS" and div_trend < -settings.PCR_Z_FADING_TREND:
+        signal = "DIVERGENCE_FADING"
+    elif signal == "RETAIL_PANIC_CALLS" and div_trend > settings.PCR_Z_FADING_TREND:
+        signal = "DIVERGENCE_FADING"
+
+    return signal
+```
+
+### Commit message
+
+```
+fix(pcr,config): expose PCR Z-score signal thresholds as named config constants (B-4)
+
+Replaced hardcoded 1.5 / 0.8 / 0.05 literals in _pcr_signal_z() with
+PCR_Z_PANIC_THRESHOLD, PCR_Z_BUILDING_THRESHOLD, PCR_Z_FADING_TREND.
+No logic change — pure parameterization for safe runtime tuning.
+```
+
+---
+""")
+
+# ---------- ISSUE B-5: Confidence Score Bucket 4 min trade count ----------
+sections.append("""## Issue B-5 — Confidence Bucket 4 Minimum Trade Count is Hardcoded
+
+**Severity:** Low  
+**File:** `optdash/ai/confidence.py`, `optdash/config.py`
+
+### What is wrong
+
+In the live `confidence.py` (Bucket 4, Historical Performance):
+
+```python
+# Current hardcoded minimum in confidence.py line ~51:
+if is_fallback or total_trades < 5:
+    b4 = 0
+```
+
+The value `5` is a magic number. It cannot be tuned via config.  
+A project with 50 live days of data might want `total_trades < 20` before trusting  
+win_rate. A backtester might want `< 3`. Currently it requires a code edit.
+
+Additionally, the win_rate formula:
+
+```python
+win_rate = (raw_wr / 100) if raw_wr is not None else 0.5
+b4 = min(10, int(win_rate * 12))
+```
+
+`win_rate * 12` means 100% win rate → b4 = 12, but `min(10, ...)` caps at 10.  
+A win rate of 84% gives exactly 10 pts. Below 84%, b4 scales linearly.  
+The `12` multiplier is also a magic number — if the bucket max changes from 10,  
+this formula silently breaks (e.g. bucket max bumped to 15 in future).
+
+### Fix — Add to `config.py` under `# -- Confidence` section
+
+```python
+# Bucket 4: Historical Performance gate.
+# Minimum number of closed trades required before win_rate is trusted.
+# Below this threshold, B4 = 0 (cold-start protection).
+CONFIDENCE_B4_MIN_TRADES: int = 5
+
+# Bucket 4 max raw points (before min() cap).
+# Keep in sync with Bucket 4 cap in compute_confidence().
+# Formula: b4 = min(CONFIDENCE_B4_MAX, int(win_rate * CONFIDENCE_B4_SCALE))
+# At 100% win rate: int(1.0 * 12) = 12, capped to 10 = max pts.
+# At 83.3% win rate: int(0.833 * 12) = 9 pts.
+CONFIDENCE_B4_MAX:   int = 10
+CONFIDENCE_B4_SCALE: int = 12   # denominator ceiling; keep at 1.2× B4_MAX
+```
+
+### Fix — Update `confidence.py` Bucket 4
+
+```python
+# Bucket 4: historical performance — cold-start guard
+is_fallback  = learning_stats.get("is_fallback", False)
+total_trades = learning_stats.get("total_trades", 0)
+
+if is_fallback or total_trades < settings.CONFIDENCE_B4_MIN_TRADES:
+    b4 = 0
+else:
+    raw_wr   = learning_stats.get("win_rate")
+    win_rate = (raw_wr / 100) if raw_wr is not None else 0.5
+    b4       = min(settings.CONFIDENCE_B4_MAX,
+                   int(win_rate * settings.CONFIDENCE_B4_SCALE))
+```
+
+### Commit message
+
+```
+fix(confidence,config): expose Bucket 4 min_trades and scale as config constants (B-5)
+
+Replaced hardcoded `total_trades < 5` and win_rate multiplier `12`
+with CONFIDENCE_B4_MIN_TRADES=5 and CONFIDENCE_B4_SCALE=12.
+No logic change — pure parameterization.
+```
+
+---
+""")
+
+# ---------- ISSUE B-6: VRP regime not in get_ivr_ivp response to recommender ----------
+sections.append("""## Issue B-6 — Recommender Does Not Pass `iv_data` to `compute_confidence()` (Part A dependency verify)
+
+**Severity:** Medium  
+**File:** `optdash/ai/recommender.py`  
+**Note:** This is the wiring fix that makes Part A's IV-OPEN-2 (VRP into Confidence) actually work.
+
+### Background
+
+Part A added `vrp_regime == "UNDERPRICED"` as a +3 pt bonus in `confidence.py` Bucket 3.  
+That change requires `iv_data` to be passed into `compute_confidence()`.
+
+Looking at the live `confidence.py`:  
+```python
+def compute_confidence(
+    gate_score, direction_result, iv_data, gex_data, vex_data, strike, learning_stats, session
+):
+```
+
+`iv_data` **is already a parameter** — `confidence.py` already receives it.  
+The question is whether `recommender.py` passes the correct `iv_data` dict.
+
+### Verify in `recommender.py`
+
+Search for the `compute_confidence(` call. It should look like:
+
+```python
+conf_result = compute_confidence(
+    gate_score       = gate_data["score"],
+    direction_result = direction_result,
+    iv_data          = iv_data,           # ← must be the dict from get_ivr_ivp()
+    gex_data         = gex_data,
+    vex_data         = vex_data,
+    strike           = best_strike,
+    learning_stats   = learning_stats,
+    session          = MarketSession(gate_data["session"]),
+)
+```
+
+**If `iv_data` is present and comes from `get_ivr_ivp()` — no change needed.**
+
+### Fix — Only if iv_data is missing or wrong
+
+If `recommender.py` passes `iv_data={}` or omits it, find the line that calls `get_ivr_ivp`:
+
+```python
+iv_data = get_ivr_ivp(conn, trade_date, snap_time, underlying)
+```
+
+Confirm this line runs **before** `compute_confidence()` is called.  
+If `get_ivr_ivp` is not called at all in the recommender, add it:
+
+```python
+from optdash.analytics.iv import get_ivr_ivp
+
+# Inside the main recommend() function, alongside other analytics calls:
+iv_data  = get_ivr_ivp(conn, trade_date, snap_time, underlying)
+```
+
+Then pass it to `compute_confidence()` as shown above.
+
+### Commit message
+
+```
+fix(recommender): ensure iv_data from get_ivr_ivp() is passed to compute_confidence() (B-6)
+
+Wires the vrp_regime field (added in Part A IV-OPEN-2) into the confidence
+score computation. iv_data must reach confidence.py for the VRP bonus to fire.
+```
+
+---
+""")
+
+# ---------- ISSUE B-7: GEX ZGL not surfaced in environment gate ----------
+sections.append("""## Issue B-7 — GEX Zero Gamma Level (ZGL) is Computed but Not Used in Any Gate or Signal
+
+**Severity:** Medium  
+**File:** `optdash/analytics/environment.py`, `optdash/analytics/alerts.py`
+
+### Background
+
+`gex.py` already computes the Zero Gamma Level (ZGL) and returns it in `get_net_gex()`:
+
+```python
+# From gex.py get_net_gex() return dict:
+"zgl":         round(zgl, 1),        # strike where cumulative GEX = 0
+"spot_vs_zgl": dist_pct,             # % of spot above (+) or below (-) ZGL
+"above_zgl":   above_zgl,            # True = stabilising, False = volatile
+```
+
+This data is fetched in `environment.py` as `gex_data` but **none of the 10 gate conditions  
+uses `zgl`, `spot_vs_zgl`, or `above_zgl`**. The Zero Gamma Level is the most important  
+structural level in the market — below ZGL, dealers are net short gamma and markets trend  
+aggressively. This should influence at minimum a pre-flight warning.
+
+### Fix — Add ZGL proximity alert to `alerts.py`
+
+In `alerts.py`, add a new alert generator:
+
+```python
+def _check_zgl_proximity(gex_data: dict, spot: float | None) -> dict | None:
+    \"\"\"
+    Fires APPROACHING_ZGL alert when spot is within ZGL_PROXIMITY_PCT of the
+    Zero Gamma Level. Below ZGL, dealers are net short gamma and markets
+    trend aggressively — mean-reversion strategies should be avoided.
+
+    above_zgl=True:  spot above ZGL → dealers long gamma → mean-reverting.
+    above_zgl=False: spot below ZGL → dealers short gamma → trending/volatile.
+    \"\"\"
+    zgl       = gex_data.get("zgl")
+    above_zgl = gex_data.get("above_zgl")
+    dist_pct  = gex_data.get("spot_vs_zgl")
+
+    if zgl is None or dist_pct is None:
+        return None
+
+    proximity_threshold = settings.ZGL_PROXIMITY_PCT   # add to config (see below)
+
+    if above_zgl is False:
+        # Spot is BELOW ZGL — dealers short gamma — trending regime
+        return {
+            "alert_type": "BELOW_ZGL",
+            "severity":   "HIGH",
+            "message": (
+                f"Spot is {abs(dist_pct):.1f}% BELOW Zero Gamma Level ({zgl}). "
+                f"Dealers net short gamma — trending/volatile regime. "
+                f"Avoid mean-reversion strategies. Momentum trades favoured."
+            ),
+            "zgl": zgl, "spot_vs_zgl": dist_pct,
+        }
+
+    if above_zgl is True and abs(dist_pct) < proximity_threshold:
+        # Spot above ZGL but approaching from above — watch for flip
+        return {
+            "alert_type": "APPROACHING_ZGL",
+            "severity":   "MEDIUM",
+            "message": (
+                f"Spot is within {abs(dist_pct):.1f}% of Zero Gamma Level ({zgl}). "
+                f"If spot crosses below ZGL, regime flips to trending. Monitor closely."
+            ),
+            "zgl": zgl, "spot_vs_zgl": dist_pct,
+        }
+    return None
+```
+
+Add `ZGL_PROXIMITY_PCT` to `config.py` under `# -- GEX`:
+
+```python
+# ZGL_PROXIMITY_PCT: distance from ZGL (as % of spot) at which to fire
+# APPROACHING_ZGL alert. E.g. 0.5 = alert when spot is within 0.5% of ZGL.
+ZGL_PROXIMITY_PCT: float = 0.5
+```
+
+In the main `get_alerts()` function, add the call:
+
+```python
+gex_data = get_net_gex(conn, trade_date, snap_time, underlying)
+spot     = gex_data.get("spot")
+zgl_alert = _check_zgl_proximity(gex_data, spot)
+if zgl_alert:
+    alerts.append(zgl_alert)
+```
+
+### Commit message
+
+```
+feat(alerts,config): add ZGL proximity and below-ZGL regime alerts (B-7)
+
+Uses Zero Gamma Level data already computed by get_net_gex() (GEX-2).
+- BELOW_ZGL (HIGH): spot below ZGL → dealers short gamma → trending regime
+- APPROACHING_ZGL (MEDIUM): spot within ZGL_PROXIMITY_PCT=0.5% of ZGL
+- Added ZGL_PROXIMITY_PCT=0.5 to config.py
+```
+
+---
+""")
+
+# ---------- RELEASE NOTES + COMMIT ORDER TABLE ----------
 sections.append("""## Final Commit — Release Notes
 
-Create `Releases/v2.6.0.md` with this content:
+Create `Releases/v2.7.0.md`:
 
 ```markdown
-# Release Notes — v2.6.0
+# Release Notes — v2.7.0
 
 **Date:** YYYY-MM-DD
-**Type:** VEX/CEX & IV Analytics Reliability
-**Branch:** fix/vex-iv-analytics-part-a
+**Type:** Analytics Completeness — Strike Screener, PCR, Skew, ZGL, Confidence
+**Branch:** fix/analytics-part-b
+**Prerequisite:** v2.6.0 (Part A) must be on main
 
 ## Summary
-Replaced approximate BSM Greek formulas with exact partial derivatives for VEX and CEX.
-Exposed all IV/VIX gate thresholds as named config constants. Wired VRP signal into
-Confidence Score. Fixed charm direction to correctly depend on net GEX sign.
+Surfaced per-strike VEX/CEX as a dedicated API endpoint. Added Skew×VEX
+convergence alert for high-conviction downside detection. Exposed PCR Z-score
+thresholds and Confidence Bucket 4 parameters as named config constants.
+Added ZGL proximity alerts. Direction alignment flag added to S_Score rows.
 
 ## Changes
 
-### VEX-1 & VEX-2: Exact BSM Vanna and Charm (processor.py, config.py)
-- Vanna: replaced heuristic δ×(1-|δ|)/(S×σ×√T) with exact -(Vega_BSM×d2)/(S×σ×√T)
-- Charm: replaced theta-proxy -θ/(S×σ×√T) with exact BSM charm formula
-- Added _bsm_d1_d2() helper and RISK_FREE_RATE=0.0625 config constant
-- ⚠️ Parquet breaking change: data/processed/ deleted + full backfill run on deploy
+### B-1 (VEX-6): Per-Strike VEX/CEX API Endpoint
+- Exposed _get_by_strike() as GET /api/vex-cex/by-strike dedicated route
+- Enables frontend heatmap rendering of strike-level dealer exposure
 
-### VEX-3: Clip Rate Monitoring (processor.py)
-- WARNING log fires when >5% of rows hit VANNA_CLIP or CHARM_CLIP in any snap
-- Surfaces upstream data quality issues (near-zero IV rows from BQ feed)
+### B-2 (VEX-7): Skew × VEX Convergence Alert
+- New get_iv_skew() in iv.py: 25-delta put/call skew + 3-snap trend direction
+- New HIGH_CONVICTION_BEAR alert in alerts.py: fires when skew STEEPENING
+  and VEX < -threshold simultaneously
+- New config constants: SKEW_ELEVATED_THRESHOLD=5.0, SKEW_STEEPENING_VEX_CONFIRM=True
 
-### VEX-4: BANKNIFTY VEX Threshold Recalibrated (config.py)
-- BANKNIFTY threshold: 0.50 → 0.35
-- Added notional-per-lot calibration comments for all underlyings
+### B-3: S_Score Direction Alignment Flag
+- Added direction_aligned boolean field to each screener row
+- Enables frontend to grey-out or flag options that misalign with trade direction
+- S_Score formula and star thresholds unchanged
 
-### VEX-5: CEX Charm Direction now GEX-Conditional (vex_cex.py)
-- _interpret() accepts net_gex parameter
-- STRONG_CHARM_BID / Dealer O'Clock interpretation flips based on sign(net_GEX)
-- net_gex_B field added to get_vex_cex_current() response payload
+### B-4: PCR Z-score Thresholds in Config
+- Replaced hardcoded 1.5/0.8/0.05 in _pcr_signal_z() with config constants
+- New: PCR_Z_PANIC_THRESHOLD=1.5, PCR_Z_BUILDING_THRESHOLD=0.8, PCR_Z_FADING_TREND=0.05
 
-### IV-OPEN-1 & IV-OPEN-3: Config Constants Exposed (config.py)
-- VRP_OVERPRICED_THRESHOLD = 2.0
-- VRP_UNDERPRICED_THRESHOLD = 0.0
-- VIX_HIGH_THRESHOLD = 20.0
-- VIX_HIGH_IVP_THRESHOLD = 35.0
-- Validator added to guard VRP_UNDERPRICED < VRP_OVERPRICED
+### B-5: Confidence Bucket 4 Parameters in Config
+- Replaced hardcoded `total_trades < 5` with CONFIDENCE_B4_MIN_TRADES=5
+- Replaced hardcoded win_rate multiplier 12 with CONFIDENCE_B4_SCALE=12
 
-### IV-OPEN-2: VRP into Confidence Score (ai/confidence.py)
-- vrp_regime == "UNDERPRICED" adds +3 pts to Structural Quality bucket (max 25 cap preserved)
+### B-6: Recommender iv_data Wiring Verified
+- Confirmed/fixed that get_ivr_ivp() result reaches compute_confidence()
+- Activates the VRP_UNDERPRICED +3 pt bonus added in v2.6.0
+
+### B-7: ZGL Proximity Alerts
+- New _check_zgl_proximity() in alerts.py
+- BELOW_ZGL (HIGH severity): spot below Zero Gamma Level
+- APPROACHING_ZGL (MEDIUM): spot within 0.5% of ZGL from above
+- New config constant: ZGL_PROXIMITY_PCT=0.5
 ```
 
 ---
 
 ## Commit Order (follow exactly)
 
-| Order | Issue | Files | Backfill? |
-|-------|-------|-------|-----------|
-| 1 | IV-OPEN-1 | `config.py` | No |
-| 2 | IV-OPEN-2 | `ai/confidence.py` | No |
-| 3 | VEX-3 | `processor.py` | No |
-| 4 | VEX-4 | `config.py` | No |
-| 5 | VEX-5 | `analytics/vex_cex.py` | No |
-| 6 | VEX-1 + VEX-2 | `processor.py`, `config.py` | **YES — delete data/processed/** |
-| 7 | Release notes | `Releases/v2.6.0.md` | No |
+| Order | Issue | Files | Risk |
+|-------|-------|-------|------|
+| 1 | B-4 | `config.py`, `analytics/pcr.py` | Low — pure parameterization |
+| 2 | B-5 | `config.py`, `ai/confidence.py` | Low — pure parameterization |
+| 3 | B-6 | `ai/recommender.py` | Low — wiring verify/fix |
+| 4 | B-3 | `analytics/screener.py` | Low — additive field only |
+| 5 | B-1 | `api/routes/` router file | Low — new endpoint |
+| 6 | B-2 | `config.py`, `analytics/iv.py`, `analytics/alerts.py` | Medium — new functions |
+| 7 | B-7 | `config.py`, `analytics/alerts.py` | Medium — new alert logic |
+| 8 | Release notes | `Releases/v2.7.0.md` | None |
 
 After all commits:
 
 ```bash
-git push origin fix/vex-iv-analytics-part-a
+git push origin fix/analytics-part-b
 # Open PR targeting main
-# Title: "VEX/CEX & IV Analytics Reliability — Part A (v2.6.0)"
+# Title: "Analytics Completeness — Skew, ZGL, PCR, Screener, Confidence (v2.7.0)"
 ```
 
-> **Part B** will cover: S_Score delta normalization, PCR Z-score divergence,
-> Skew × VEX convergence alert, GEX zero-level computation, and Confidence Score
-> historical performance minimum trade count fix.
+---
+
+## Cross-Reference: All Open Issues Status After Part A + Part B
+
+| Issue ID | Description | Part | Status After |
+|----------|-------------|------|--------------|
+| IV-OPEN-1 | VRP/VIX thresholds in config | A | ✅ Done |
+| IV-OPEN-2 | VRP into Confidence Score | A | ✅ Done |
+| IV-OPEN-3 | VIX gate params in config | A | ✅ Done (via IV-OPEN-1) |
+| VEX-1 | Exact BSM vanna | A | ✅ Done |
+| VEX-2 | Exact BSM charm | A | ✅ Done |
+| VEX-3 | Clip rate monitoring | A | ✅ Done |
+| VEX-4 | BANKNIFTY VEX threshold | A | ✅ Done |
+| VEX-5 | CEX direction via GEX sign | A | ✅ Done |
+| VEX-6 | Per-strike VEX/CEX API | B | ✅ Done (B-1) |
+| VEX-7 | Skew×VEX convergence alert | B | ✅ Done (B-2) |
+| B-3 | S_Score direction alignment | B | ✅ Done |
+| B-4 | PCR Z-score thresholds in config | B | ✅ Done |
+| B-5 | Confidence B4 min_trades in config | B | ✅ Done |
+| B-6 | Recommender iv_data wiring | B | ✅ Done |
+| B-7 | ZGL proximity alerts | B | ✅ Done |
+""")

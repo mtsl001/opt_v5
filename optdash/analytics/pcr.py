@@ -296,11 +296,11 @@ def _pcr_signal_z(div: float, z: float, snap_count: int, div_trend: float) -> st
     signal = "BALANCED"
     if snap_count >= settings.PCR_ZSCORE_WINDOW:
         # Z-score regime — normalized signal
-        if z > 1.5:
+        if z > settings.PCR_Z_PANIC_THRESHOLD:
             signal = "RETAIL_PANIC_PUTS"
-        elif z < -1.5:
+        elif z < -settings.PCR_Z_PANIC_THRESHOLD:
             signal = "RETAIL_PANIC_CALLS"
-        elif abs(z) > 0.8:
+        elif abs(z) > settings.PCR_Z_BUILDING_THRESHOLD:
             signal = "DIVERGENCE_BUILDING"
     else:
         # Fallback to absolute thresholds before window is filled
@@ -312,9 +312,9 @@ def _pcr_signal_z(div: float, z: float, snap_count: int, div_trend: float) -> st
             signal = "DIVERGENCE_BUILDING"
             
     # Blunt signal on reversion:
-    if signal == "RETAIL_PANIC_PUTS" and div_trend < -0.05:
+    if signal == "RETAIL_PANIC_PUTS" and div_trend < -settings.PCR_Z_FADING_TREND:
         signal = "DIVERGENCE_FADING"
-    elif signal == "RETAIL_PANIC_CALLS" and div_trend > 0.05:
+    elif signal == "RETAIL_PANIC_CALLS" and div_trend > settings.PCR_Z_FADING_TREND:
         signal = "DIVERGENCE_FADING"
         
     return signal
