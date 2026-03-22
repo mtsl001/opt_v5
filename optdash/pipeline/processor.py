@@ -407,15 +407,37 @@ def _compute_gex_vex_cex(df: pd.DataFrame, lot_size: int) -> pd.DataFrame:
 
     # VEX — stored in Rs M (already divided by 1e6 = _VEX_SCALE).
     # vex_cex.py queries SUM(vex) directly; no further /1e6 in SQL.
-    vanna        = opts["delta"] * (1.0 - opts["delta"].abs()) / denom
-    vanna        = vanna.clip(-settings.VANNA_CLIP, settings.VANNA_CLIP)  # P0-3
+    raw_vanna    = opts["delta"] * (1.0 - opts["delta"].abs()) / denom
+    vanna        = raw_vanna.clip(-settings.VANNA_CLIP, settings.VANNA_CLIP)  # P0-3
     opts["vex"]  = (opts["oi"] * lot_size * vanna * opts["spot"]) / _VEX_SCALE
 
     # CEX — stored in Rs M (already divided by 1e6 = _CEX_SCALE).
     # vex_cex.py queries SUM(cex) directly; no further /1e6 in SQL.
-    charm        = -opts["theta"] / denom
-    charm        = charm.clip(-settings.CHARM_CLIP, settings.CHARM_CLIP)  # P0-2
+    raw_charm    = -opts["theta"] / denom
+    charm        = raw_charm.clip(-settings.CHARM_CLIP, settings.CHARM_CLIP)  # P0-2
     opts["cex"]  = (opts["oi"] * lot_size * charm) / _CEX_SCALE
+
+    total_opt_rows   = len(opts)
+    clip_count_vanna = int((raw_vanna.abs() > settings.VANNA_CLIP).sum())
+    clip_count_charm = int((raw_charm.abs() > settings.CHARM_CLIP).sum())
+
+    if total_opt_rows > 0:
+        vanna_rate = clip_count_vanna / total_opt_rows
+        charm_rate = clip_count_charm / total_opt_rows
+        underlying = str(df["underlying"].iloc[0]) if not df.empty else "UNKNOWN"
+
+        if vanna_rate > 0.05:
+            logger.warning(
+                "HIGH VANNA CLIP RATE {:.1%} ({}/{} rows) for {}. "
+                "Check for near-zero IV rows in BQ feed.",
+                vanna_rate, clip_count_vanna, total_opt_rows, underlying
+            )
+        if charm_rate > 0.05:
+            logger.warning(
+                "HIGH CHARM CLIP RATE {:.1%} ({}/{} rows) for {}. "
+                "Check for near-zero IV rows in BQ feed.",
+                charm_rate, clip_count_charm, total_opt_rows, underlying
+            )
 
     # Explicit float64 cast avoids FutureWarning about setting incompatible
     # dtype (opts may contain pd.NA from nullable-int OI arithmetic).
