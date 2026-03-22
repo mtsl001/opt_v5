@@ -143,6 +143,9 @@ Alerts fire when market signals cross thresholds **between two consecutive snaps
 | `VCOC_SPIKE_BEAR` | `v_coc_15m <= VCOC_BEAR_THRESHOLD` |
 | `PCR_EXTREME` | PCR divergence outside `[BEAR_THR, BULL_THR]` |
 | `IV_SPIKE` | ATM IV jumps > 20% vs previous snap |
+| `HIGH_CONVICTION_BEAR` | Put Skew STEEPENING simultaneously whilst VEX is Bearish |
+| `APPROACHING_ZGL` | Spot within `ZGL_PROXIMITY_PCT` of Zero Gamma Level |
+| `BELOW_ZGL` | Spot crosses below Zero Gamma Level |
 | `VOLUME_SURGE` | Volume > `VOLUME_SPIKE_RATIO × rolling_median` |
 | `DEALER_OCLOCK` | DTE=1 + time >= `DEALER_OCLOCK_START` on expiry weekday |
 
@@ -150,8 +153,8 @@ Alerts fire when market signals cross thresholds **between two consecutive snaps
 
 | Level | Examples |
 |---|---|
-| `HIGH` | `GEX_FLIP`, `DEALER_OCLOCK`, `VCOC_SPIKE_BEAR` at large magnitude |
-| `MEDIUM` | `PCR_EXTREME`, `IV_SPIKE` |
+| `HIGH` | `GEX_FLIP`, `DEALER_OCLOCK`, `VCOC_SPIKE_BEAR`, `HIGH_CONVICTION_BEAR`, `BELOW_ZGL` |
+| `MEDIUM` | `PCR_EXTREME`, `IV_SPIKE`, `APPROACHING_ZGL` |
 | `LOW` | `VOLUME_SURGE` |
 
 ### 3.3 Alert Format

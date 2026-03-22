@@ -125,6 +125,7 @@ Example: gate=9/11 → `int(9/11 * 25)` = 20 pts.
 | GEX regime is `NEGATIVE_TREND` or `POSITIVE_DECLINING` | +5 | |
 | `VEX_BULLISH` and direction `CE` | +3 | |
 | `VEX_BEARISH` and direction `PE` | +3 | |
+| `VRP` regime is `UNDERPRICED` | +3 | |
 
 Max without cap = 6+4+7+5+3 = 25.
 
@@ -133,12 +134,12 @@ Max without cap = 6+4+7+5+3 = 25.
 ```python
 is_fallback  = learning_stats.get("is_fallback", False)
 total_trades = learning_stats.get("total_trades", 0)
-if is_fallback or total_trades < 5:
+if is_fallback or total_trades < settings.CONFIDENCE_B4_MIN_TRADES:
     b4 = 0   # cold-start guard
 else:
     raw_wr = learning_stats.get("win_rate")
     win_rate = (raw_wr / 100) if raw_wr is not None else 0.5
-    b4 = min(10, int(win_rate * 12))
+    b4 = min(settings.CONFIDENCE_B4_MAX, int(win_rate * settings.CONFIDENCE_B4_SCALE))
 ```
 
 `win_rate` may be `None` when no closed trades exist (cold-start) — `None` is never silently converted to a fictitious 50%.

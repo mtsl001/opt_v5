@@ -1,4 +1,4 @@
-# OptDash v2.0
+# OptDash v2.7.0
 
 **Options Analytics & AI Trading Engine** — real-time dealer flow analysis and automated trade recommendations for NSE index options.
 
@@ -174,6 +174,7 @@ Rec.  Tracker Shadow
 | GET | `/api/micro/alerts` | Live alert feed |
 | GET | `/api/micro/volume-velocity` | Volume velocity heatmap |
 | GET | `/api/micro/vex-cex` | VEX/CEX series + Dealer O'Clock |
+| GET | `/api/micro/vex-cex/by-strike` | Per-strike VEX/CEX breakdown |
 
 ### Strike Screener
 
@@ -221,6 +222,11 @@ All settings live in `.env` (see `.env.example` for full reference):
 | `AI_TARGET_MULT` | `1.50` | Target = entry × multiplier |
 | `TRAILING_STOP_ACTIVATION` | `0.20` | Activate trailing stop at +20% PnL |
 | `GATE_SUSTAINED_NO_GO_SNAPS` | `2` | Auto-close after N consecutive gate NO_GO |
+| `PCR_Z_PANIC_THRESHOLD` | `1.5` | Z-score limit triggering retail panic alerts |
+| `VIX_HIGH_THRESHOLD` | `20.0` | High VIX threshold adjusting IVP gates |
+| `SKEW_ELEVATED_THRESHOLD` | `5.0` | Put-Call 25D IV difference threshold for alerts |
+| `CONFIDENCE_B4_MIN_TRADES` | `5` | Cold-start minimum trades guard for B4 |
+| `RISK_FREE_RATE` | `0.0625` | Base rate for exact BSM calculations |
 
 ---
 
