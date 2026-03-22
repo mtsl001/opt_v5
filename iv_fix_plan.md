@@ -1,621 +1,853 @@
-# IV Analytics — Fix Plan for Junior Developer
-## `iv.py` + `environment.py` + `config.py`
-**Version:** v2.3.0 target  
-**Repo:** https://github.com/mtsl001/opt_v5  
-**Reviewer:** Senior Dev notes consolidated from two external sources + code audit  
-**Author of this doc:** Perplexity AI review session, 2026-03-21  
+# OptDash — VEX/CEX & IV Analytics Fix Plan: Part B
+
+**Target modules:** `ai/confidence.py` · `analytics/screener.py` · `analytics/pcr.py` · `analytics/vex_cex.py` · `analytics/iv.py` · `config.py`  
+**Release:** v2.6.0 → v2.6.1  
+**Branch to create:** `fix/analytics-part-b`  
+
+> **For the junior developer:**  
+> Part B covers the remaining open issues from the consolidated review.  
+> Every section gives you the exact current code (from the live repo), the precise  
+> replacement, and the commit message. Follow the Commit Order table at the end.  
+> Do NOT touch any file not listed in an issue.
 
 ---
 
-## Overview
+## Pre-Flight Checklist
 
-Six issues were found in the IV analytics module (`optdash/analytics/iv.py`).  
-They are grouped into **6 commits**, ordered by dependency and risk.
+# Create Part B branch
+git checkout -b fix/analytics-part-b
 
-| ID | Issue | Severity | Files | Gate Impact |
-|----|-------|----------|-------|-------------|
-| IV-1 | HV20 uses daily `MAX(spot)` — should be day-close | 🔴 HIGH | `iv.py` | `iv_hv_spread` / VRP accuracy |
-| IV-2 | IVR uses raw MIN/MAX — one spike distorts 252-day range | 🔴 HIGH | `iv.py`, `config.py` | Display only (IVP drives C5) |
-| IV-3 | Term structure uses static ratio — not DTE-normalized | 🔴 HIGH | `iv.py`, `config.py` | Gate C7 directly |
-| IV-4 | VRP not named / classified — `iv_hv_spread` is ambiguous | 🟡 MED | `iv.py`, `config.py` | None (display) |
-| IV-5 | `iv_hv_spread` silently returns `0.0` when `hv20` is None | 🟡 MED | `iv.py` | None (display) |
-| IV-6 | India VIX not integrated into Gate C5 | 🟡 MED | `iv.py`, `environment.py`, `config.py` | Gate C5 directly |
-
-> **NOT in this plan** (already correct, no action needed):
-> - Gate C5 already uses IVP, not IVR ✓
-> - ATM definition in `get_ivr_ivp()` uses exact single closest strike ✓  
-> - IVP has a 20-day minimum sample guard ✓  
-> - IVP query and IVR query share the same `IV_LOOKBACK_DAYS` window ✓  
-> - `iv_hv_spread` already exists (just needs renaming per IV-4) ✓
-
----
-
-## Prerequisite: Understand the Code Structure
-
-Before starting, read these files in order:
-
-1. `optdash/analytics/iv.py` — the module you will change
-2. `optdash/analytics/environment.py` — Gate C5 reads from `iv.py`
-3. `optdash/config.py` — all threshold constants live here
-4. `optdash/pipeline/vix_pipeline.py` — VIX parquet layout
-5. `data/processed/vix/trade_date=YYYY-MM-DD/vix.parquet` — VIX data file
-
-Key facts:
-- `get_ivr_ivp()` is called by `get_environment_score()` in `environment.py`
-- The DuckDB view `options_data` covers `data/processed/trade_date=*/` files
-- VIX data lives in a **separate** path: `data/processed/vix/trade_date=*/vix.parquet`
-- VIX is NOT in the `options_data` view — it must be read with `read_parquet()` directly
-
----
-
-## Commit 1 — IV-1: Fix HV20 Daily Close (replace `MAX(spot)` → last snap)
-
-### Why
-HV20 is computed from `MAX(spot)` grouped by `trade_date`. This picks the intraday
-HIGH, not the market close. Log returns computed from `HIGH(day_N) / HIGH(day_N-1)`
-overstate realized volatility during trending days. The correct value is the last
-`spot` reading of each day — the 15:29 or 15:30 snap at 1-min cadence.
-
-### Files Changed
-- `optdash/analytics/iv.py` — `get_ivr_ivp()` HV20 SQL only
-
-### Exact Change
-
-**In `get_ivr_ivp()`**, find the `hv20_row` SQL block (around line 90) and replace
-the innermost query.
-
-**OLD SQL** (inside the triple-nested query):
-```sql
-SELECT
-    trade_date,
-    LN(
-        MAX(spot) /
-        LAG(MAX(spot)) OVER (ORDER BY trade_date)
-    ) AS daily_ret
-FROM options_data
-WHERE underlying=? AND trade_date <= ?
-GROUP BY trade_date
-ORDER BY trade_date DESC
-```
-
-**NEW SQL** (replace `MAX(spot)` with `LAST`):
-```sql
-SELECT
-    trade_date,
-    LN(
-        LAST(spot ORDER BY snap_time) /
-        LAG(LAST(spot ORDER BY snap_time)) OVER (ORDER BY trade_date)
-    ) AS daily_ret
-FROM options_data
-WHERE underlying=? AND trade_date <= ?
-GROUP BY trade_date
-ORDER BY trade_date DESC
-```
-
-> `LAST(spot ORDER BY snap_time)` picks the spot value at the latest snap
-> of each day — a much better proxy for the NSE closing price than daily high.
-
-### No Other Changes Needed
-The outer structure (triple-nested + `LIMIT 22`) stays the same. Only the
-`MAX(spot)` expressions inside are replaced.
-
-### How to Test
-After the change, print `hv20` for a known date and compare to NSE's official
-annualized HV. The new value should be noticeably closer to the official figure
-on trending days.
-
-### Commit Message
-```
-fix(iv): IV-1 — replace MAX(spot) with LAST(spot) for HV20 daily close
-
-HV20 log returns now computed from last snap of each day (≈15:29-15:30)
-instead of daily intraday high. Prevents upward bias in realized vol
-on trending days. Triple-nested query structure unchanged.
+# Sanity check — these should all exist after Part A
+python -c "from optdash.config import settings; print(settings.RISK_FREE_RATE)"
+python -c "from optdash.config import settings; print(settings.VRP_OVERPRICED_THRESHOLD)"
 ```
 
 ---
+""")
 
-## Commit 2 — IV-2: Fix IVR Outlier Trap (percentile caps on 252-day range)
+# ---------- ISSUE B-1: VEX-6 per-strike VEX/CEX viz ----------
+sections.append("""## Issue B-1 (VEX-6) — Per-Strike VEX/CEX Data Already Exists, Missing from API Route
 
-### Why
-`iv_low = MIN(daily_atm_iv)` and `iv_high = MAX(daily_atm_iv)` over 252 days.
-One event spike (e.g. election day IV jumps to 80%) permanently pins `iv_high = 80`
-for the next year. Every subsequent IVR reading will be near zero even when IV is
-genuinely elevated at 25%.
+**Severity:** Low  
+**File:** `optdash/api/routes/vex_cex_router.py` (or wherever API routes live)  
+**Note:** `_get_by_strike()` in `vex_cex.py` already computes per-strike VEX/CEX and  
+`get_vex_cex_full()` already returns `by_strike` in its response payload.  
+The data EXISTS — it is just not exposed as a dedicated endpoint.
 
-The fix: replace `MIN`/`MAX` with **1st percentile** and **99th percentile**.
-A single spike event will no longer anchor the range.
+### Verify it is wired up
 
-### Files Changed
-- `optdash/analytics/iv.py` — `get_ivr_ivp()` historical stats SQL
-- `optdash/config.py` — add two new constants
-
-### Step 1 — Add constants to `config.py`
-
-Find the `# -- IV` section (around line with `IV_LOOKBACK_DAYS`) and add:
+Open the FastAPI router file (search for `vex` in the `api/routes/` folder).  
+Look for a route like:
 
 ```python
-IVR_LOW_PERCENTILE:  float = 0.01   # 1st percentile — strips black-swan spikes
-IVR_HIGH_PERCENTILE: float = 0.99   # 99th percentile
+@router.get("/vex-cex/full")
+async def vex_cex_full(...):
+    return get_vex_cex_full(conn, trade_date, snap_time, underlying)
 ```
 
-### Step 2 — Update `iv.py` hist SQL
+If this route exists and `by_strike` is in the response, **this issue is already resolved**.  
+Check by calling: `GET /api/vex-cex/full?underlying=NIFTY&...` and confirming `by_strike` is present.
 
-**OLD SQL** (the `hist` query in `get_ivr_ivp()`):
-```sql
-SELECT
-    MIN(daily_atm_iv) AS iv_low,
-    MAX(daily_atm_iv) AS iv_high,
-    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY daily_atm_iv) AS iv_median
-FROM (
-    SELECT trade_date, AVG(iv) AS daily_atm_iv
-    FROM options_data
-    WHERE underlying=? AND expiry_tier='TIER1'
-      AND trade_date < ?
-      AND trade_date >= ?
-    GROUP BY trade_date
-)
-```
+### Fix — Only if `by_strike` endpoint is missing
 
-**NEW SQL**:
-```sql
-SELECT
-    PERCENTILE_CONT(?) WITHIN GROUP (ORDER BY daily_atm_iv) AS iv_low,
-    PERCENTILE_CONT(?) WITHIN GROUP (ORDER BY daily_atm_iv) AS iv_high,
-    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY daily_atm_iv) AS iv_median
-FROM (
-    SELECT trade_date, AVG(iv) AS daily_atm_iv
-    FROM options_data
-    WHERE underlying=? AND expiry_tier='TIER1'
-      AND trade_date < ?
-      AND trade_date >= ?
-    GROUP BY trade_date
-)
-```
+If there is no dedicated per-strike endpoint, add one to the router:
 
-Update the parameter list from:
 ```python
-conn.execute(sql, [underlying, trade_date, hist_start])
-```
-To:
-```python
-conn.execute(sql, [
-    settings.IVR_LOW_PERCENTILE,   # 1st param: PERCENTILE_CONT(?) for iv_low
-    settings.IVR_HIGH_PERCENTILE,  # 2nd param: PERCENTILE_CONT(?) for iv_high
-    underlying, trade_date, hist_start
-])
-```
-
-### Note on Existing Fallbacks
-The existing fallback logic is correct and does not change:
-```python
-iv_low    = hist[0] if hist and hist[0] else atm_iv * 0.5
-iv_high   = hist[1] if hist and hist[1] else atm_iv * 1.5
+@router.get("/vex-cex/by-strike")
+async def vex_cex_by_strike(
+    underlying: str,
+    trade_date: str,
+    snap_time:  str,
+    conn = Depends(get_db_conn),
+):
+    \"\"\"
+    Per-strike VEX and CEX breakdown for frontend heatmap rendering.
+    Returns list of {strike_price, option_type, moneyness_pct, vex_M, cex_M, oi, iv, dte}.
+    Sorted by strike_price ascending.
+    \"\"\"
+    from optdash.analytics.vex_cex import _get_by_strike
+    return _get_by_strike(conn, trade_date, snap_time, underlying)
 ```
 
-### Commit Message
-```
-fix(iv): IV-2 — replace MIN/MAX with percentile caps for IVR range
+**Note:** `_get_by_strike` is already imported and returns the correct schema  
+with `moneyness_pct` None-safe (the NULL NULLIF fix is already in the live code).
 
-iv_low / iv_high now use 1st and 99th percentile (configurable via
-IVR_LOW_PERCENTILE / IVR_HIGH_PERCENTILE in config.py).
-Prevents single black-swan event from permanently anchoring the
-252-day IV range and making IVR read near-zero for months.
+### Commit message
+
+```
+feat(api): expose per-strike VEX/CEX as dedicated endpoint /vex-cex/by-strike (VEX-6)
+
+Data was already computed by _get_by_strike() in vex_cex.py and included
+in the /vex-cex/full response. Added dedicated route for frontend heatmap
+rendering without requiring the full payload.
 ```
 
 ---
+""")
 
-## Commit 3 — IV-3: Fix Term Structure Shape (slope normalization)
+# ---------- ISSUE B-2: VEX-7 Skew x VEX convergence alert ----------
+sections.append("""## Issue B-2 (VEX-7) — Skew × VEX Convergence Alert is Absent
 
-### Why
-Current code: `ratio = far_iv / near_iv`, fires CONTANGO if `ratio > 1.05`.
-Problem: on expiry week, near-expiry has 1–2 DTE and TIER2 has 25+ DTE.
-Normal carry makes `ratio ≈ 1.15–1.25` even in a completely healthy market.
-Gate C7 will fire BACKWARDATION/CONTANGO when nothing unusual is happening.
+**Severity:** Low  
+**Files:** `optdash/analytics/iv.py`, `optdash/analytics/alerts.py`, `optdash/config.py`
 
-The fix: replace the static ratio with a **slope per √DTE unit** — this
-normalizes the curve so the same threshold applies across all expiry distances.
+### What is wrong
 
-Formula:
-```
-Slope = (IV_far - IV_near) / (√DTE_far - √DTE_near)
-```
+When the 25-Delta put IV minus 25-Delta call IV (put skew) steepens **simultaneously** with  
+`VEX < -threshold` (bearish vanna pressure), it is a high-conviction downside signal.  
+This composite alert does not currently exist anywhere in the codebase.
 
-### Files Changed
-- `optdash/analytics/iv.py` — `_classify_shape()` signature and logic, `get_term_structure()` call
-- `optdash/config.py` — add two new slope thresholds
+### Step 1 — Add a skew computation function to `iv.py`
 
-### Step 1 — Add constants to `config.py`
-
-Find the `# -- IV` section and add:
-```python
-TS_CONTANGO_SLOPE:      float =  0.30   # annualized IV units per √day
-TS_BACKWARDATION_SLOPE: float = -0.30
-```
-
-> Start with ±0.30. After one week of live data, check how often these fire
-> and tune up or down.
-
-### Step 2 — Update `_classify_shape()` in `iv.py`
-
-**OLD:**
-```python
-def _classify_shape(near_iv: float | None, far_iv: float | None) -> str:
-    if near_iv is None or far_iv is None or near_iv == 0:
-        return TermStructureShape.FLAT.value
-    ratio = far_iv / near_iv
-    if ratio > 1.05:
-        return TermStructureShape.CONTANGO.value
-    if ratio < 0.95:
-        return TermStructureShape.BACKWARDATION.value
-    return TermStructureShape.FLAT.value
-```
-
-**NEW:**
-```python
-import math   # add at top of file if not already present
-
-def _classify_shape(
-    near_iv:  float | None,
-    far_iv:   float | None,
-    near_dte: int = 30,
-    far_dte:  int = 60,
-) -> str:
-    if near_iv is None or far_iv is None or near_iv == 0:
-        return TermStructureShape.FLAT.value
-    denom = math.sqrt(max(far_dte, 1)) - math.sqrt(max(near_dte, 1))
-    if denom <= 0:
-        # Same DTE or near > far — cannot compute meaningful slope
-        return TermStructureShape.FLAT.value
-    slope = (far_iv - near_iv) / denom
-    if slope > settings.TS_CONTANGO_SLOPE:
-        return TermStructureShape.CONTANGO.value
-    if slope < settings.TS_BACKWARDATION_SLOPE:
-        return TermStructureShape.BACKWARDATION.value
-    return TermStructureShape.FLAT.value
-```
-
-### Step 3 — Pass `dte` values from `get_term_structure()`
-
-`get_term_structure()` already queries `MIN(o.dte) AS dte` per row.
-The `series` list already has `"dte"` in each entry.
-Update the `_classify_shape()` call at the end of `get_term_structure()`:
-
-**OLD:**
-```python
-shape = _classify_shape(near_iv, far_iv)
-```
-
-**NEW:**
-```python
-near_dte = int(series[0]["dte"] or 1)
-far_dte  = int(series[-1]["dte"] or 60)
-shape    = _classify_shape(near_iv, far_iv, near_dte, far_dte)
-```
-
-### Commit Message
-```
-fix(iv): IV-3 — replace static ratio with DTE-normalized slope for term structure
-
-_classify_shape() now computes (IV_far - IV_near) / (√DTE_far - √DTE_near).
-Prevents false CONTANGO on expiry week when normal carry widens the ratio.
-New config keys: TS_CONTANGO_SLOPE, TS_BACKWARDATION_SLOPE (±0.30 default).
-Gate C7 now fires only on genuine term structure distortion.
-```
-
----
-
-## Commit 4 — IV-4 + IV-5: VRP Naming + None Fix
-
-### Why
-**IV-4:** `iv_hv_spread` is confusing. The field is the Volatility Risk Premium
-(VRP = ATM_IV − HV20). Traders reading the API response see `iv_hv_spread = 4.2`
-with no context. Rename to `vrp` and add a `vrp_regime` label.
-
-**IV-5:** When `hv20 is None` (first 22 trading days), the code does:
-```python
-"iv_hv_spread": round(atm_iv - (hv20 or atm_iv), 2)
-```
-`(None or atm_iv)` evaluates to `atm_iv`, so spread = 0.0 — which looks like
-"IV equals realized vol" when actually there's no HV data at all.
-
-Both are fixed in the same commit since they touch the same lines.
-
-### Files Changed
-- `optdash/analytics/iv.py` — `get_ivr_ivp()` return dict
-- `optdash/config.py` — add VRP thresholds
-
-### Step 1 — Add constants to `config.py`
-```python
-VRP_OVERPRICED_THRESHOLD:  float =  2.0   # IV exceeds HV20 by 2 pts → sellers favored
-VRP_UNDERPRICED_THRESHOLD: float =  0.0   # IV below HV20 → buyers favored
-```
-
-### Step 2 — Update the return dict in `get_ivr_ivp()`
-
-**OLD:**
-```python
-"iv_hv_spread": round(atm_iv - (hv20 or atm_iv), 2),
-```
-
-**NEW:**
-```python
-vrp = round(atm_iv - hv20, 2) if hv20 is not None else None
-
-vrp_regime = (
-    "OVERPRICED"  if vrp is not None and vrp >  settings.VRP_OVERPRICED_THRESHOLD  else
-    "UNDERPRICED" if vrp is not None and vrp <  settings.VRP_UNDERPRICED_THRESHOLD else
-    "FAIR"        if vrp is not None else
-    "UNKNOWN"
-)
-```
-
-Then in the return dict, replace:
-```python
-"iv_hv_spread": round(atm_iv - (hv20 or atm_iv), 2),
-```
-With:
-```python
-"vrp":          vrp,
-"iv_hv_spread": vrp,        # backward-compat alias — keeps frontend working
-"vrp_regime":   vrp_regime,
-```
-
-> `iv_hv_spread` is kept as an alias so any existing frontend or API consumer
-> that reads `iv_hv_spread` does not break. Remove it in a future cleanup.
-
-### Commit Message
-```
-fix(iv): IV-4 IV-5 — rename iv_hv_spread to vrp, fix None propagation
-
-iv_hv_spread = None is now correctly returned when hv20 is unavailable
-(was silently returning 0.0 due to `hv20 or atm_iv` coercion).
-vrp_regime label added: OVERPRICED / UNDERPRICED / FAIR / UNKNOWN.
-iv_hv_spread kept as backward-compat alias.
-```
-
----
-
-## Commit 5 — IV-6: India VIX Integration into Gate C5
-
-### Why
-Gate C5 currently fires on `ivp_val < 50` (IV cheap = buy options).
-India VIX from `data/processed/vix/` is already collected every minute
-by `vix_pipeline.py` but no analytics module reads it yet.
-
-When India VIX > 20 (elevated fear), even a low IVP reading (e.g. IVP = 30)
-should NOT be treated as "IV cheap to buy" — the market is in high-volatility
-regime and option prices can spike further intraday.
-
-This commit adds a VIX-adjusted penalty to the C5 note and IVP display,
-without changing Gate C5's pass/fail logic (that is Commit 6).
-
-### Files Changed
-- `optdash/analytics/iv.py` — new `get_india_vix()` helper
-- `optdash/config.py` — add `VIX_HIGH_THRESHOLD`
-
-### Step 1 — Add constant to `config.py`
-```python
-# -- India VIX
-VIX_HIGH_THRESHOLD: float = 20.0   # VIX above this = elevated regime
-```
-
-### Step 2 — Add `get_india_vix()` to `iv.py`
-
-Add this new function at the bottom of `iv.py` (before the closing):
+At the bottom of `iv.py`, add this new function:
 
 ```python
-def get_india_vix(trade_date: str, snap_time: str) -> float | None:
-    """Read India VIX for the given snap from the VIX parquet side-file.
+def get_iv_skew(
+    conn:       duckdb.DuckDBPyConnection,
+    trade_date: str,
+    snap_time:  str,
+    underlying: str,
+) -> dict:
+    \"\"\"
+    Compute 25-delta put/call IV skew for TIER1 options.
 
-    VIX data lives outside the main options_data DuckDB view — it is stored
-    at data/processed/vix/trade_date=YYYY-MM-DD/vix.parquet and must be
-    read directly with read_parquet(), not via the conn object.
+    Skew = IV of the strike closest to 25-delta PUT minus
+           IV of the strike closest to 25-delta CALL.
 
-    Returns the float VIX value, or None if the file does not exist yet
-    (e.g. market not open, VIX pull lagging, or first startup).
-    Non-fatal by design — a VIX read failure must never crash IV analytics.
-    """
+    Positive skew: put wing more expensive than call wing (normal for indices).
+    Rising skew: fear increasing, put demand accelerating.
+    This is the standard skew measure used by dealers and vol desks.
+
+    Returns:
+        skew:           float — current skew value (in IV %)
+        put_25d_iv:     float — IV of nearest 25-delta put strike
+        call_25d_iv:    float — IV of nearest 25-delta call strike
+        skew_direction: str   — \"STEEPENING\" / \"FLATTENING\" / \"FLAT\" / \"UNKNOWN\"
+        skew_regime:    str   — \"ELEVATED\" (> threshold) / \"NORMAL\" / \"UNKNOWN\"
+    \"\"\"
     try:
-        from pathlib import Path
-        import pyarrow.parquet as pq
-        vix_path = (
-            Path(settings.DATA_ROOT) / "vix"
-            / f"trade_date={trade_date}" / "vix.parquet"
-        )
-        if not vix_path.exists():
-            return None
-        table = pq.read_table(
-            vix_path,
-            columns=["snap_time", "india_vix"],
-            filters=[("snap_time", "==", snap_time)],
-        )
-        if table.num_rows == 0:
-            # Exact snap not found — return latest available snap
-            full = pq.read_table(vix_path, columns=["snap_time", "india_vix"])
-            df = full.to_pandas().dropna(subset=["india_vix"])
-            if df.empty:
-                return None
-            return float(df.sort_values("snap_time").iloc[-1]["india_vix"])
-        val = table.to_pandas()["india_vix"].iloc[0]
-        return float(val) if val is not None else None
+        # Find nearest-to-0.25-delta strikes for CE and PE
+        row = conn.execute(\"\"\"
+            WITH t1 AS (
+                SELECT option_type, strike_price, iv, delta
+                FROM options_data
+                WHERE trade_date=? AND snap_time=? AND underlying=?
+                  AND expiry_tier='TIER1' AND iv > 0
+            ),
+            puts AS (
+                SELECT iv, delta, strike_price
+                FROM t1
+                WHERE option_type='PE'
+                ORDER BY ABS(ABS(delta) - 0.25)
+                LIMIT 1
+            ),
+            calls AS (
+                SELECT iv, delta, strike_price
+                FROM t1
+                WHERE option_type='CE'
+                ORDER BY ABS(ABS(delta) - 0.25)
+                LIMIT 1
+            )
+            SELECT p.iv AS put_iv, c.iv AS call_iv
+            FROM puts p, calls c
+        \"\"\", [trade_date, snap_time, underlying]).fetchone()
+
+        if not row or row[0] is None or row[1] is None:
+            return {"skew": None, "put_25d_iv": None, "call_25d_iv": None,
+                    "skew_direction": "UNKNOWN", "skew_regime": "UNKNOWN"}
+
+        put_iv  = float(row[0])
+        call_iv = float(row[1])
+        skew    = round(put_iv - call_iv, 2)
+
+        # Trailing skew trend: compare to skew 3 snaps ago
+        prev_row = conn.execute(\"\"\"
+            WITH ordered AS (
+                SELECT snap_time
+                FROM options_data
+                WHERE trade_date=? AND underlying=? AND snap_time < ?
+                GROUP BY snap_time
+                ORDER BY snap_time DESC
+                LIMIT 3
+            ),
+            oldest AS (SELECT MIN(snap_time) AS st FROM ordered),
+            puts AS (
+                SELECT o.iv
+                FROM options_data o, oldest old_s
+                WHERE o.trade_date=? AND o.snap_time=old_s.st
+                  AND o.underlying=? AND o.expiry_tier='TIER1'
+                  AND o.option_type='PE' AND o.iv > 0
+                ORDER BY ABS(ABS(o.delta) - 0.25) LIMIT 1
+            ),
+            calls AS (
+                SELECT o.iv
+                FROM options_data o, oldest old_s
+                WHERE o.trade_date=? AND o.snap_time=old_s.st
+                  AND o.underlying=? AND o.expiry_tier='TIER1'
+                  AND o.option_type='CE' AND o.iv > 0
+                ORDER BY ABS(ABS(o.delta) - 0.25) LIMIT 1
+            )
+            SELECT p.iv, c.iv FROM puts p, calls c
+        \"\"\", [trade_date, underlying, snap_time,
+                trade_date, underlying,
+                trade_date, underlying]).fetchone()
+
+        skew_direction = "UNKNOWN"
+        if prev_row and prev_row[0] is not None and prev_row[1] is not None:
+            prev_skew = float(prev_row[0]) - float(prev_row[1])
+            delta_skew = skew - prev_skew
+            if delta_skew > 0.3:
+                skew_direction = "STEEPENING"
+            elif delta_skew < -0.3:
+                skew_direction = "FLATTENING"
+            else:
+                skew_direction = "FLAT"
+
+        skew_threshold = settings.SKEW_ELEVATED_THRESHOLD   # add to config (see Step 2)
+        skew_regime = "ELEVATED" if skew > skew_threshold else "NORMAL"
+
+        return {
+            "skew":           skew,
+            "put_25d_iv":     round(put_iv, 2),
+            "call_25d_iv":    round(call_iv, 2),
+            "skew_direction": skew_direction,
+            "skew_regime":    skew_regime,
+        }
     except Exception as e:
-        logger.debug("get_india_vix: read failed (non-critical) — {}", e)
+        logger.warning("get_iv_skew error: {}", e)
+        return {"skew": None, "put_25d_iv": None, "call_25d_iv": None,
+                "skew_direction": "UNKNOWN", "skew_regime": "UNKNOWN"}
+```
+
+### Step 2 — Add `SKEW_ELEVATED_THRESHOLD` to `config.py`
+
+In the `# -- IV` section:
+
+```python
+# Skew = 25D Put IV - 25D Call IV (in IV %)
+# Typical NIFTY skew range: 2-6%. Above 6% = elevated fear premium.
+# SKEW_ELEVATED_THRESHOLD: above this, put-skew is considered "elevated".
+# Used in Skew×VEX convergence alert (B-2).
+SKEW_ELEVATED_THRESHOLD: float = 5.0
+
+# SKEW_STEEPENING_VEX_CONFIRM: when skew is STEEPENING and VEX < -threshold,
+# this triggers HIGH_CONVICTION_BEAR alert.
+# These two signals together confirm vanna-accelerated selling pressure.
+SKEW_STEEPENING_VEX_CONFIRM: bool = True
+```
+
+### Step 3 — Add the composite alert to `alerts.py`
+
+Open `alerts.py` and find the section that generates alert objects (look for a list/dict  
+being built with alert names like `"GEX_FLIP"`, `"CHARM_ACTIVE"`, etc.).
+
+Add a new alert generator function:
+
+```python
+def _check_skew_vex_convergence(
+    skew_data: dict,
+    vex_data:  dict,
+    underlying: str,
+) -> dict | None:
+    \"\"\"
+    HIGH_CONVICTION_BEAR alert fires when:
+      1. Skew is STEEPENING (put-wing demand accelerating)
+      AND
+      2. VEX total is below -threshold (bearish vanna pressure from dealers)
+
+    These two signals together confirm that:
+      a) Market participants are buying puts aggressively (steepening skew)
+      b) Dealers are forced to short the underlying as IV rises (negative VEX)
+    This combination has historically preceded violent, accelerating downside moves.
+    \"\"\"
+    if not settings.SKEW_STEEPENING_VEX_CONFIRM:
         return None
+
+    skew_direction = skew_data.get("skew_direction", "UNKNOWN")
+    skew_regime    = skew_data.get("skew_regime", "UNKNOWN")
+    vex_total      = vex_data.get("vex_total_M", 0.0)
+    vex_threshold  = settings.VEX_THRESHOLDS.get(underlying, settings.VEX_BULL_THRESHOLD)
+
+    # Both conditions must be true simultaneously
+    skew_steepening = (skew_direction == "STEEPENING")
+    vex_bearish     = (vex_total < -vex_threshold)
+
+    if skew_steepening and vex_bearish:
+        return {
+            "alert_type":  "HIGH_CONVICTION_BEAR",
+            "severity":    "HIGH",
+            "message": (
+                f"Skew steepening ({skew_data.get('skew', 'N/A')}%) + "
+                f"VEX bearish ({round(vex_total, 2)} Rs M) — "
+                f"vanna-accelerated selling pressure confirmed. "
+                f"High-conviction downside setup."
+            ),
+            "skew":       skew_data.get("skew"),
+            "vex_total_M": vex_total,
+        }
+    return None
 ```
 
-### Step 3 — Add `india_vix` to `get_ivr_ivp()` return dict
-
-At the end of `get_ivr_ivp()`, before the final `return {}`, add:
+Then in the main `get_alerts()` function in `alerts.py`, add the call:
 
 ```python
-india_vix      = get_india_vix(trade_date, snap_time)
-vix_regime     = (
-    "HIGH" if india_vix is not None and india_vix > settings.VIX_HIGH_THRESHOLD
-    else "NORMAL" if india_vix is not None
-    else "UNKNOWN"
-)
+# Import at top if not present:
+from optdash.analytics.iv      import get_iv_skew
+from optdash.analytics.vex_cex import get_vex_cex_current
 
-return {
-    ...existing keys...,
-    "india_vix":  round(india_vix, 2) if india_vix is not None else None,
-    "vix_regime": vix_regime,
-}
+# Inside get_alerts():
+skew_data = get_iv_skew(conn, trade_date, snap_time, underlying)
+vex_data  = get_vex_cex_current(conn, trade_date, snap_time, underlying)
+
+skew_vex_alert = _check_skew_vex_convergence(skew_data, vex_data, underlying)
+if skew_vex_alert:
+    alerts.append(skew_vex_alert)
 ```
 
-### How to Test
-1. Verify `data/processed/vix/trade_date=YYYY-MM-DD/vix.parquet` exists
-2. Call `/api/iv?underlying=NIFTY&trade_date=...&snap_time=...`
-3. Check response contains `"india_vix": 18.5, "vix_regime": "NORMAL"`
-4. When VIX > 20, response shows `"vix_regime": "HIGH"`
+### Commit message
 
-### Commit Message
 ```
-feat(iv): IV-6a — add India VIX read to get_ivr_ivp() response
+feat(iv,alerts): add Skew×VEX convergence HIGH_CONVICTION_BEAR alert (VEX-7)
 
-New helper get_india_vix() reads from data/processed/vix/ Parquet
-side-file. Returns None non-fatally when file unavailable.
-get_ivr_ivp() now returns india_vix + vix_regime fields.
-VIX_HIGH_THRESHOLD = 20.0 added to config.py.
-Gate C5 logic unchanged — see next commit.
+- New get_iv_skew() in iv.py: computes 25-delta put/call skew + 3-snap trend
+- New _check_skew_vex_convergence() in alerts.py: fires HIGH_CONVICTION_BEAR
+  when skew STEEPENING AND VEX < -threshold simultaneously
+- Added SKEW_ELEVATED_THRESHOLD=5.0 and SKEW_STEEPENING_VEX_CONFIRM=True to config.py
 ```
 
 ---
+""")
 
-## Commit 6 — IV-6b: VIX Penalty in Gate C5
+# ---------- ISSUE B-3: S_Score delta component ----------
+sections.append("""## Issue B-3 — S_Score Delta Component is Asymmetric (CE vs PE scoring)
 
-### Why
-After Commit 5, `india_vix` is available in `iv_data`. This commit uses it
-to apply a **display note** and **adjusted IVP threshold** in Gate C5:
+**Severity:** Medium  
+**File:** `optdash/analytics/screener.py`
 
-- Normal: C5 passes when `ivp < 50`
-- When VIX is HIGH (> 20): C5 only passes when `ivp < 35`
-  (tighter bar — must be in bottom 35th percentile to qualify as "cheap"
-  in a high-fear regime)
+### What is wrong
 
-### Files Changed
-- `optdash/analytics/environment.py` — C5 gate logic block
-- `optdash/config.py` — add `VIX_HIGH_IVP_THRESHOLD`
+Current S_Score delta term (line in `screener.py`):
 
-### Step 1 — Add constant to `config.py`
 ```python
-VIX_HIGH_IVP_THRESHOLD: float = 35.0   # IVP must be below this when VIX is HIGH
-# Normal threshold is still IVP < 50 (reuses existing gate logic)
+? * ABS(o.delta)   -- W_DELTA coefficient
 ```
 
-### Step 2 — Update Gate C5 in `environment.py`
+For a **call (CE)**: delta is positive (0 to +1). `ABS(delta)` = delta. Higher delta = higher score.  
+For a **put (PE)**: delta is negative (-1 to 0). `ABS(delta)` = |delta|. Same scoring — OK.
 
-Find the C5 block (currently around line 80):
+**However**, the direction filter (`AND o.option_type = ?`) already restricts results to one  
+side when `direction` is passed. The issue is that delta 0.50 = ATM scores highest, and  
+delta 0.10 = deep OTM scores lowest. This is **correct for buyers** — ATM has highest gamma  
+and is the preferred entry for an options buying strategy.
 
-**OLD:**
+**BUT** the screener cap `SCREENER_MAX_DELTA = 0.50` means the delta term can only reach  
+`W_DELTA × 0.50 = 2.0 × 0.50 = 1.0` as its maximum contribution, capped at half the  
+theoretical max (2.0). The docstring says:  
+`"delta is capped at 0.50 by the SCREENER_MAX_DELTA filter"` — so this is intentional.
+
+**The real problem:** When `direction=None` (both CE and PE returned), a PE with  
+delta = -0.40 and a CE with delta = +0.40 score identically. But if the market context  
+is bearish (VEX bearish, GEX negative), returning CE options with 4-star S_Score in the  
+same list as PE options is misleading — the score does not encode directional alignment.
+
+### Fix — Add a `direction_bonus` column to the S_Score output
+
+Do NOT change the S_Score formula itself (risk of breaking existing star thresholds).  
+Instead, add a `direction_alignment` field to the returned row that the frontend can use  
+for visual flagging:
+
+In `get_strikes()`, after the `return [...]` list comprehension, add a post-processing step:
+
 ```python
-# C5: IV cheap (IVP < 50) (1 pt)
-ivp_val = ivp if ivp is not None else 100.0
-c5_met  = ivp_val < 50
-conditions["ivp_cheap"] = {
-    "met": c5_met, "value": round(ivp_val, 1),
-    "points": 1, "note": f"IVP = {ivp_val:.0f}th pct"
-}
-```
+rows_out = [
+    {k: (round(v, 4) if isinstance(v, float) else v)
+     for k, v in zip(cols, r)}
+    for r in rows
+]
 
-**NEW:**
-```python
-# C5: IV cheap — threshold tightens when India VIX is elevated (1 pt)
-# When VIX_HIGH_THRESHOLD is breached, require IVP < VIX_HIGH_IVP_THRESHOLD
-# (default 35) instead of the normal < 50. This prevents "IV cheap" signal
-# from firing in high-fear regimes where IV can spike further intraday.
-india_vix  = iv_data.get("india_vix")
-vix_regime = iv_data.get("vix_regime", "UNKNOWN")
-ivp_val    = ivp if ivp is not None else 100.0
-
-if vix_regime == "HIGH":
-    c5_threshold = settings.VIX_HIGH_IVP_THRESHOLD   # 35 when VIX elevated
-    c5_note_suffix = f" | VIX={india_vix:.1f} HIGH → threshold={c5_threshold}"
+# Add direction alignment flag for frontend visual cues.
+# direction_aligned = True when the option side matches the requested direction.
+# When direction=None, all rows default to True (no filtering context).
+if direction:
+    for row_dict in rows_out:
+        row_dict["direction_aligned"] = (row_dict.get("option_type") == direction)
 else:
-    c5_threshold   = 50.0
-    c5_note_suffix = f" | VIX={'N/A' if india_vix is None else f'{india_vix:.1f}'}"
+    for row_dict in rows_out:
+        row_dict["direction_aligned"] = True
 
-c5_met = ivp_val < c5_threshold
-conditions["ivp_cheap"] = {
-    "met": c5_met, "value": round(ivp_val, 1),
-    "points": 1,
-    "note": f"IVP = {ivp_val:.0f}th pct{c5_note_suffix}"
-}
+return rows_out
 ```
 
-### Important: Gate Score Does Not Change
-The C5 point weight remains 1. The max score stays 11. The only change is the
-IVP threshold used to decide pass/fail, and the note text shown to the trader.
+This gives the frontend a clean boolean to show/grey-out misaligned options  
+without changing the numeric S_Score or breaking existing threshold calibrations.
 
-### How to Test
-- VIX = 18, IVP = 40: C5 passes (40 < 50, normal threshold)
-- VIX = 22, IVP = 40: C5 fails (40 > 35, HIGH threshold)  
-- VIX = 22, IVP = 28: C5 passes (28 < 35, HIGH threshold still met)
-- VIX = None, IVP = 40: C5 passes (unknown VIX → use normal threshold)
+### Commit message
 
-### Commit Message
 ```
-feat(iv): IV-6b — VIX-adjusted IVP threshold in Gate C5
+feat(screener): add direction_aligned flag to S_Score output rows (B-3)
 
-When india_vix > VIX_HIGH_THRESHOLD (20.0), Gate C5 requires
-IVP < VIX_HIGH_IVP_THRESHOLD (35.0) instead of normal < 50.
-Prevents "IV cheap" signal in elevated fear regimes.
-Gate max score (11) and all other gates unchanged.
-VIX_HIGH_IVP_THRESHOLD = 35.0 added to config.py.
+When direction='CE' or 'PE', marks each row with direction_aligned=True/False
+so the frontend can visually flag options that match the trade direction.
+S_Score formula and star thresholds are unchanged.
 ```
 
 ---
+""")
 
-## Final Commit Order Summary
+# ---------- ISSUE B-4: PCR Z-score window not in config ----------
+sections.append("""## Issue B-4 — PCR Z-score Constants are Config-Exposed but Need Review
 
-| Order | Commit | Depends On | Risk |
-|-------|--------|-----------|------|
-| 1 | IV-1: HV20 → `LAST(spot)` | None | Low |
-| 2 | IV-2: IVR percentile caps | None (can parallel with 1) | Low |
-| 3 | IV-3: Term structure slope | None (can parallel with 1,2) | Medium — recalibrate TS thresholds |
-| 4 | IV-4 + IV-5: VRP rename + None fix | None | Low |
-| 5 | IV-6a: India VIX read | None | Low (non-fatal) |
-| 6 | IV-6b: VIX Gate C5 penalty | Commit 5 (needs `india_vix` in iv_data) | Medium — verify thresholds |
+**Severity:** Low (documentation + one logic gap)  
+**File:** `optdash/analytics/pcr.py`, `optdash/config.py`
 
----
+### What is well-implemented (do NOT change)
 
-## Config Changes Summary
+Looking at the live `pcr.py`:
+- `_trailing_pcr_metrics()` computes rolling mean/std over `PCR_ZSCORE_WINDOW` snaps ✅
+- `_pcr_signal_z()` uses Z > 1.5 / Z < -1.5 for panic signals, falls back to absolute thresholds when window is not filled ✅
+- `div_trend` (LAG-based momentum) correctly softens panic signals on reversion (`DIVERGENCE_FADING`) ✅
+- `get_pcr_series()` uses SQL window functions for the series path ✅
 
-All new keys to add to `config.py` under their respective sections:
+### What is missing — Z-score threshold not in config
+
+`_pcr_signal_z()` has **hardcoded Z thresholds**:
 
 ```python
-# -- IV (existing section)
-IVR_LOW_PERCENTILE:      float = 0.01   # IV-2: 1st percentile for IVR low anchor
-IVR_HIGH_PERCENTILE:     float = 0.99   # IV-2: 99th percentile for IVR high anchor
-TS_CONTANGO_SLOPE:       float = 0.30   # IV-3: slope threshold for CONTANGO
-TS_BACKWARDATION_SLOPE:  float = -0.30  # IV-3: slope threshold for BACKWARDATION
-VRP_OVERPRICED_THRESHOLD: float = 2.0   # IV-4: IV exceeds HV20 by this → OVERPRICED
-VRP_UNDERPRICED_THRESHOLD: float = 0.0  # IV-4: IV below HV20 → UNDERPRICED
+# Current hardcoded values in pcr.py — lines inside _pcr_signal_z():
+if z > 1.5:
+    signal = "RETAIL_PANIC_PUTS"
+elif z < -1.5:
+    signal = "RETAIL_PANIC_CALLS"
+elif abs(z) > 0.8:
+    signal = "DIVERGENCE_BUILDING"
+```
 
-# -- India VIX (new section)
-VIX_HIGH_THRESHOLD:      float = 20.0   # IV-6: VIX above this = HIGH regime
-VIX_HIGH_IVP_THRESHOLD:  float = 35.0   # IV-6b: IVP threshold when VIX is HIGH
+And the divergence fading thresholds:
+
+```python
+if signal == "RETAIL_PANIC_PUTS" and div_trend < -0.05:
+    signal = "DIVERGENCE_FADING"
+elif signal == "RETAIL_PANIC_CALLS" and div_trend > 0.05:
+    signal = "DIVERGENCE_FADING"
+```
+
+These 4 values cannot be tuned without editing source code.
+
+### Fix — Add Z-score signal thresholds to `config.py`
+
+In the `# -- PCR` section:
+
+```python
+# PCR Z-score signal thresholds.
+# Z-score = (current_div - rolling_mean) / rolling_std
+# over PCR_ZSCORE_WINDOW snaps (default 20).
+#
+# PCR_Z_PANIC_THRESHOLD:     |Z| > this → RETAIL_PANIC_PUTS / RETAIL_PANIC_CALLS
+# PCR_Z_BUILDING_THRESHOLD:  |Z| > this → DIVERGENCE_BUILDING (weaker signal)
+# PCR_Z_FADING_TREND:        div_trend magnitude to trigger DIVERGENCE_FADING override.
+#   Positive value: when puts-panic but div is falling by this much, signal softens.
+PCR_Z_PANIC_THRESHOLD:    float = 1.5
+PCR_Z_BUILDING_THRESHOLD: float = 0.8
+PCR_Z_FADING_TREND:       float = 0.05
+```
+
+### Fix — Replace hardcoded values in `pcr.py`
+
+In `_pcr_signal_z()`, replace the hardcoded literals:
+
+```python
+def _pcr_signal_z(div: float, z: float, snap_count: int, div_trend: float) -> str:
+    signal = "BALANCED"
+    if snap_count >= settings.PCR_ZSCORE_WINDOW:
+        if z > settings.PCR_Z_PANIC_THRESHOLD:
+            signal = "RETAIL_PANIC_PUTS"
+        elif z < -settings.PCR_Z_PANIC_THRESHOLD:
+            signal = "RETAIL_PANIC_CALLS"
+        elif abs(z) > settings.PCR_Z_BUILDING_THRESHOLD:
+            signal = "DIVERGENCE_BUILDING"
+    else:
+        # Fallback to absolute thresholds before window is filled
+        if div > settings.PCR_DIV_BULL_THRESHOLD:
+            signal = "RETAIL_PANIC_PUTS"
+        elif div < settings.PCR_DIV_BEAR_THRESHOLD:
+            signal = "RETAIL_PANIC_CALLS"
+        elif abs(div) > 0.10:
+            signal = "DIVERGENCE_BUILDING"
+
+    # Reversion softener
+    if signal == "RETAIL_PANIC_PUTS" and div_trend < -settings.PCR_Z_FADING_TREND:
+        signal = "DIVERGENCE_FADING"
+    elif signal == "RETAIL_PANIC_CALLS" and div_trend > settings.PCR_Z_FADING_TREND:
+        signal = "DIVERGENCE_FADING"
+
+    return signal
+```
+
+### Commit message
+
+```
+fix(pcr,config): expose PCR Z-score signal thresholds as named config constants (B-4)
+
+Replaced hardcoded 1.5 / 0.8 / 0.05 literals in _pcr_signal_z() with
+PCR_Z_PANIC_THRESHOLD, PCR_Z_BUILDING_THRESHOLD, PCR_Z_FADING_TREND.
+No logic change — pure parameterization for safe runtime tuning.
+```
+
+---
+""")
+
+# ---------- ISSUE B-5: Confidence Score Bucket 4 min trade count ----------
+sections.append("""## Issue B-5 — Confidence Bucket 4 Minimum Trade Count is Hardcoded
+
+**Severity:** Low  
+**File:** `optdash/ai/confidence.py`, `optdash/config.py`
+
+### What is wrong
+
+In the live `confidence.py` (Bucket 4, Historical Performance):
+
+```python
+# Current hardcoded minimum in confidence.py line ~51:
+if is_fallback or total_trades < 5:
+    b4 = 0
+```
+
+The value `5` is a magic number. It cannot be tuned via config.  
+A project with 50 live days of data might want `total_trades < 20` before trusting  
+win_rate. A backtester might want `< 3`. Currently it requires a code edit.
+
+Additionally, the win_rate formula:
+
+```python
+win_rate = (raw_wr / 100) if raw_wr is not None else 0.5
+b4 = min(10, int(win_rate * 12))
+```
+
+`win_rate * 12` means 100% win rate → b4 = 12, but `min(10, ...)` caps at 10.  
+A win rate of 84% gives exactly 10 pts. Below 84%, b4 scales linearly.  
+The `12` multiplier is also a magic number — if the bucket max changes from 10,  
+this formula silently breaks (e.g. bucket max bumped to 15 in future).
+
+### Fix — Add to `config.py` under `# -- Confidence` section
+
+```python
+# Bucket 4: Historical Performance gate.
+# Minimum number of closed trades required before win_rate is trusted.
+# Below this threshold, B4 = 0 (cold-start protection).
+CONFIDENCE_B4_MIN_TRADES: int = 5
+
+# Bucket 4 max raw points (before min() cap).
+# Keep in sync with Bucket 4 cap in compute_confidence().
+# Formula: b4 = min(CONFIDENCE_B4_MAX, int(win_rate * CONFIDENCE_B4_SCALE))
+# At 100% win rate: int(1.0 * 12) = 12, capped to 10 = max pts.
+# At 83.3% win rate: int(0.833 * 12) = 9 pts.
+CONFIDENCE_B4_MAX:   int = 10
+CONFIDENCE_B4_SCALE: int = 12   # denominator ceiling; keep at 1.2× B4_MAX
+```
+
+### Fix — Update `confidence.py` Bucket 4
+
+```python
+# Bucket 4: historical performance — cold-start guard
+is_fallback  = learning_stats.get("is_fallback", False)
+total_trades = learning_stats.get("total_trades", 0)
+
+if is_fallback or total_trades < settings.CONFIDENCE_B4_MIN_TRADES:
+    b4 = 0
+else:
+    raw_wr   = learning_stats.get("win_rate")
+    win_rate = (raw_wr / 100) if raw_wr is not None else 0.5
+    b4       = min(settings.CONFIDENCE_B4_MAX,
+                   int(win_rate * settings.CONFIDENCE_B4_SCALE))
+```
+
+### Commit message
+
+```
+fix(confidence,config): expose Bucket 4 min_trades and scale as config constants (B-5)
+
+Replaced hardcoded `total_trades < 5` and win_rate multiplier `12`
+with CONFIDENCE_B4_MIN_TRADES=5 and CONFIDENCE_B4_SCALE=12.
+No logic change — pure parameterization.
+```
+
+---
+""")
+
+# ---------- ISSUE B-6: VRP regime not in get_ivr_ivp response to recommender ----------
+sections.append("""## Issue B-6 — Recommender Does Not Pass `iv_data` to `compute_confidence()` (Part A dependency verify)
+
+**Severity:** Medium  
+**File:** `optdash/ai/recommender.py`  
+**Note:** This is the wiring fix that makes Part A's IV-OPEN-2 (VRP into Confidence) actually work.
+
+### Background
+
+Part A added `vrp_regime == "UNDERPRICED"` as a +3 pt bonus in `confidence.py` Bucket 3.  
+That change requires `iv_data` to be passed into `compute_confidence()`.
+
+Looking at the live `confidence.py`:  
+```python
+def compute_confidence(
+    gate_score, direction_result, iv_data, gex_data, vex_data, strike, learning_stats, session
+):
+```
+
+`iv_data` **is already a parameter** — `confidence.py` already receives it.  
+The question is whether `recommender.py` passes the correct `iv_data` dict.
+
+### Verify in `recommender.py`
+
+Search for the `compute_confidence(` call. It should look like:
+
+```python
+conf_result = compute_confidence(
+    gate_score       = gate_data["score"],
+    direction_result = direction_result,
+    iv_data          = iv_data,           # ← must be the dict from get_ivr_ivp()
+    gex_data         = gex_data,
+    vex_data         = vex_data,
+    strike           = best_strike,
+    learning_stats   = learning_stats,
+    session          = MarketSession(gate_data["session"]),
+)
+```
+
+**If `iv_data` is present and comes from `get_ivr_ivp()` — no change needed.**
+
+### Fix — Only if iv_data is missing or wrong
+
+If `recommender.py` passes `iv_data={}` or omits it, find the line that calls `get_ivr_ivp`:
+
+```python
+iv_data = get_ivr_ivp(conn, trade_date, snap_time, underlying)
+```
+
+Confirm this line runs **before** `compute_confidence()` is called.  
+If `get_ivr_ivp` is not called at all in the recommender, add it:
+
+```python
+from optdash.analytics.iv import get_ivr_ivp
+
+# Inside the main recommend() function, alongside other analytics calls:
+iv_data  = get_ivr_ivp(conn, trade_date, snap_time, underlying)
+```
+
+Then pass it to `compute_confidence()` as shown above.
+
+### Commit message
+
+```
+fix(recommender): ensure iv_data from get_ivr_ivp() is passed to compute_confidence() (B-6)
+
+Wires the vrp_regime field (added in Part A IV-OPEN-2) into the confidence
+score computation. iv_data must reach confidence.py for the VRP bonus to fire.
+```
+
+---
+""")
+
+# ---------- ISSUE B-7: GEX ZGL not surfaced in environment gate ----------
+sections.append("""## Issue B-7 — GEX Zero Gamma Level (ZGL) is Computed but Not Used in Any Gate or Signal
+
+**Severity:** Medium  
+**File:** `optdash/analytics/environment.py`, `optdash/analytics/alerts.py`
+
+### Background
+
+`gex.py` already computes the Zero Gamma Level (ZGL) and returns it in `get_net_gex()`:
+
+```python
+# From gex.py get_net_gex() return dict:
+"zgl":         round(zgl, 1),        # strike where cumulative GEX = 0
+"spot_vs_zgl": dist_pct,             # % of spot above (+) or below (-) ZGL
+"above_zgl":   above_zgl,            # True = stabilising, False = volatile
+```
+
+This data is fetched in `environment.py` as `gex_data` but **none of the 10 gate conditions  
+uses `zgl`, `spot_vs_zgl`, or `above_zgl`**. The Zero Gamma Level is the most important  
+structural level in the market — below ZGL, dealers are net short gamma and markets trend  
+aggressively. This should influence at minimum a pre-flight warning.
+
+### Fix — Add ZGL proximity alert to `alerts.py`
+
+In `alerts.py`, add a new alert generator:
+
+```python
+def _check_zgl_proximity(gex_data: dict, spot: float | None) -> dict | None:
+    \"\"\"
+    Fires APPROACHING_ZGL alert when spot is within ZGL_PROXIMITY_PCT of the
+    Zero Gamma Level. Below ZGL, dealers are net short gamma and markets
+    trend aggressively — mean-reversion strategies should be avoided.
+
+    above_zgl=True:  spot above ZGL → dealers long gamma → mean-reverting.
+    above_zgl=False: spot below ZGL → dealers short gamma → trending/volatile.
+    \"\"\"
+    zgl       = gex_data.get("zgl")
+    above_zgl = gex_data.get("above_zgl")
+    dist_pct  = gex_data.get("spot_vs_zgl")
+
+    if zgl is None or dist_pct is None:
+        return None
+
+    proximity_threshold = settings.ZGL_PROXIMITY_PCT   # add to config (see below)
+
+    if above_zgl is False:
+        # Spot is BELOW ZGL — dealers short gamma — trending regime
+        return {
+            "alert_type": "BELOW_ZGL",
+            "severity":   "HIGH",
+            "message": (
+                f"Spot is {abs(dist_pct):.1f}% BELOW Zero Gamma Level ({zgl}). "
+                f"Dealers net short gamma — trending/volatile regime. "
+                f"Avoid mean-reversion strategies. Momentum trades favoured."
+            ),
+            "zgl": zgl, "spot_vs_zgl": dist_pct,
+        }
+
+    if above_zgl is True and abs(dist_pct) < proximity_threshold:
+        # Spot above ZGL but approaching from above — watch for flip
+        return {
+            "alert_type": "APPROACHING_ZGL",
+            "severity":   "MEDIUM",
+            "message": (
+                f"Spot is within {abs(dist_pct):.1f}% of Zero Gamma Level ({zgl}). "
+                f"If spot crosses below ZGL, regime flips to trending. Monitor closely."
+            ),
+            "zgl": zgl, "spot_vs_zgl": dist_pct,
+        }
+    return None
+```
+
+Add `ZGL_PROXIMITY_PCT` to `config.py` under `# -- GEX`:
+
+```python
+# ZGL_PROXIMITY_PCT: distance from ZGL (as % of spot) at which to fire
+# APPROACHING_ZGL alert. E.g. 0.5 = alert when spot is within 0.5% of ZGL.
+ZGL_PROXIMITY_PCT: float = 0.5
+```
+
+In the main `get_alerts()` function, add the call:
+
+```python
+gex_data = get_net_gex(conn, trade_date, snap_time, underlying)
+spot     = gex_data.get("spot")
+zgl_alert = _check_zgl_proximity(gex_data, spot)
+if zgl_alert:
+    alerts.append(zgl_alert)
+```
+
+### Commit message
+
+```
+feat(alerts,config): add ZGL proximity and below-ZGL regime alerts (B-7)
+
+Uses Zero Gamma Level data already computed by get_net_gex() (GEX-2).
+- BELOW_ZGL (HIGH): spot below ZGL → dealers short gamma → trending regime
+- APPROACHING_ZGL (MEDIUM): spot within ZGL_PROXIMITY_PCT=0.5% of ZGL
+- Added ZGL_PROXIMITY_PCT=0.5 to config.py
+```
+
+---
+""")
+
+# ---------- RELEASE NOTES + COMMIT ORDER TABLE ----------
+sections.append("""## Final Commit — Release Notes
+
+Create `Releases/v2.7.0.md`:
+
+```markdown
+# Release Notes — v2.7.0
+
+**Date:** YYYY-MM-DD
+**Type:** Analytics Completeness — Strike Screener, PCR, Skew, ZGL, Confidence
+**Branch:** fix/analytics-part-b
+**Prerequisite:** v2.6.0 (Part A) must be on main
+
+## Summary
+Surfaced per-strike VEX/CEX as a dedicated API endpoint. Added Skew×VEX
+convergence alert for high-conviction downside detection. Exposed PCR Z-score
+thresholds and Confidence Bucket 4 parameters as named config constants.
+Added ZGL proximity alerts. Direction alignment flag added to S_Score rows.
+
+## Changes
+
+### B-1 (VEX-6): Per-Strike VEX/CEX API Endpoint
+- Exposed _get_by_strike() as GET /api/vex-cex/by-strike dedicated route
+- Enables frontend heatmap rendering of strike-level dealer exposure
+
+### B-2 (VEX-7): Skew × VEX Convergence Alert
+- New get_iv_skew() in iv.py: 25-delta put/call skew + 3-snap trend direction
+- New HIGH_CONVICTION_BEAR alert in alerts.py: fires when skew STEEPENING
+  and VEX < -threshold simultaneously
+- New config constants: SKEW_ELEVATED_THRESHOLD=5.0, SKEW_STEEPENING_VEX_CONFIRM=True
+
+### B-3: S_Score Direction Alignment Flag
+- Added direction_aligned boolean field to each screener row
+- Enables frontend to grey-out or flag options that misalign with trade direction
+- S_Score formula and star thresholds unchanged
+
+### B-4: PCR Z-score Thresholds in Config
+- Replaced hardcoded 1.5/0.8/0.05 in _pcr_signal_z() with config constants
+- New: PCR_Z_PANIC_THRESHOLD=1.5, PCR_Z_BUILDING_THRESHOLD=0.8, PCR_Z_FADING_TREND=0.05
+
+### B-5: Confidence Bucket 4 Parameters in Config
+- Replaced hardcoded `total_trades < 5` with CONFIDENCE_B4_MIN_TRADES=5
+- Replaced hardcoded win_rate multiplier 12 with CONFIDENCE_B4_SCALE=12
+
+### B-6: Recommender iv_data Wiring Verified
+- Confirmed/fixed that get_ivr_ivp() result reaches compute_confidence()
+- Activates the VRP_UNDERPRICED +3 pt bonus added in v2.6.0
+
+### B-7: ZGL Proximity Alerts
+- New _check_zgl_proximity() in alerts.py
+- BELOW_ZGL (HIGH severity): spot below Zero Gamma Level
+- APPROACHING_ZGL (MEDIUM): spot within 0.5% of ZGL from above
+- New config constant: ZGL_PROXIMITY_PCT=0.5
 ```
 
 ---
 
-## Testing Checklist Before Merging
+## Commit Order (follow exactly)
 
-After all 6 commits are done:
+| Order | Issue | Files | Risk |
+|-------|-------|-------|------|
+| 1 | B-4 | `config.py`, `analytics/pcr.py` | Low — pure parameterization |
+| 2 | B-5 | `config.py`, `ai/confidence.py` | Low — pure parameterization |
+| 3 | B-6 | `ai/recommender.py` | Low — wiring verify/fix |
+| 4 | B-3 | `analytics/screener.py` | Low — additive field only |
+| 5 | B-1 | `api/routes/` router file | Low — new endpoint |
+| 6 | B-2 | `config.py`, `analytics/iv.py`, `analytics/alerts.py` | Medium — new functions |
+| 7 | B-7 | `config.py`, `analytics/alerts.py` | Medium — new alert logic |
+| 8 | Release notes | `Releases/v2.7.0.md` | None |
 
-- [ ] `get_ivr_ivp()` returns `vrp`, `iv_hv_spread` (alias), `vrp_regime`
-- [ ] `get_ivr_ivp()` returns `india_vix` and `vix_regime`  
-- [ ] `vrp = None` when `hv20 is None` (not `0.0`)
-- [ ] HV20 changes on a trending day vs flat day (sanity check vs old value)
-- [ ] IVR no longer reads near-zero after a past spike event (verify with backfill data)
-- [ ] Term structure CONTANGO/BACKWARDATION does not fire on expiry week for no reason
-- [ ] Gate C5 note shows VIX value in the `conditions` response
-- [ ] Gate C5 fails when IVP = 40 AND VIX > 20 (threshold = 35)
-- [ ] Gate C5 passes when IVP = 40 AND VIX < 20 (threshold = 50)
-- [ ] Gate C5 passes (normal) when `india_vix = None`
-- [ ] Service starts cleanly — no import errors, no pydantic validation errors
+After all commits:
+
+```bash
+git push origin fix/analytics-part-b
+# Open PR targeting main
+# Title: "Analytics Completeness — Skew, ZGL, PCR, Screener, Confidence (v2.7.0)"
+```
 
 ---
 
-*Document generated: 2026-03-21*  
-*Next review: after v2.3.0 is live for 3 trading days — recalibrate TS_CONTANGO_SLOPE and VIX_HIGH_IVP_THRESHOLD*
+## Cross-Reference: All Open Issues Status After Part A + Part B
+
+| Issue ID | Description | Part | Status After |
+|----------|-------------|------|--------------|
+| IV-OPEN-1 | VRP/VIX thresholds in config | A | ✅ Done |
+| IV-OPEN-2 | VRP into Confidence Score | A | ✅ Done |
+| IV-OPEN-3 | VIX gate params in config | A | ✅ Done (via IV-OPEN-1) |
+| VEX-1 | Exact BSM vanna | A | ✅ Done |
+| VEX-2 | Exact BSM charm | A | ✅ Done |
+| VEX-3 | Clip rate monitoring | A | ✅ Done |
+| VEX-4 | BANKNIFTY VEX threshold | A | ✅ Done |
+| VEX-5 | CEX direction via GEX sign | A | ✅ Done |
+| VEX-6 | Per-strike VEX/CEX API | B | ✅ Done (B-1) |
+| VEX-7 | Skew×VEX convergence alert | B | ✅ Done (B-2) |
+| B-3 | S_Score direction alignment | B | ✅ Done |
+| B-4 | PCR Z-score thresholds in config | B | ✅ Done |
+| B-5 | Confidence B4 min_trades in config | B | ✅ Done |
+| B-6 | Recommender iv_data wiring | B | ✅ Done |
+| B-7 | ZGL proximity alerts | B | ✅ Done |
+""")

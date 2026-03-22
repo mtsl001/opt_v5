@@ -49,6 +49,14 @@ def compute_confidence(
     vex_sig = vex_data.get("vex_signal", "")
     if vex_sig == "VEX_BULLISH" and direction == "CE":  b3 += 3
     if vex_sig == "VEX_BEARISH" and direction == "PE":  b3 += 3
+
+    # VRP bonus (+3): when VRP < 0, options are genuinely underpriced vs realised vol.
+    # This is the statistically strongest entry context for option buyers.
+    # Source: iv_data["vrp_regime"] from get_ivr_ivp().
+    vrp_regime = iv_data.get("vrp_regime", "UNKNOWN")
+    if vrp_regime == "UNDERPRICED":
+        b3 += 3
+
     b3 = min(25, b3)
 
     # Bucket 4: historical performance — P4-F14b: cold-start guard.
@@ -58,12 +66,12 @@ def compute_confidence(
     # The explicit None guard is an extra safety net for future callers.
     is_fallback  = learning_stats.get("is_fallback", False)
     total_trades = learning_stats.get("total_trades", 0)
-    if is_fallback or total_trades < 5:
+    if is_fallback or total_trades < settings.CONFIDENCE_B4_MIN_TRADES:
         b4 = 0
     else:
         raw_wr = learning_stats.get("win_rate")
         win_rate = (raw_wr / 100) if raw_wr is not None else 0.5
-        b4 = min(10, int(win_rate * 12))
+        b4 = min(settings.CONFIDENCE_B4_MAX, int(win_rate * settings.CONFIDENCE_B4_SCALE))
 
     raw = b1 + b2 + b3 + b4
 

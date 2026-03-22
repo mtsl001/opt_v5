@@ -49,3 +49,19 @@ def vex_cex(
     duck = Depends(get_duck),
 ):
     return get_vex_cex_full(duck, trade_date, snap_time, underlying)
+
+
+@router.get("/vex-cex/by-strike")
+def vex_cex_by_strike(
+    trade_date: TradeDate = Query(...),
+    snap_time:  SnapTime  = Query(...),
+    underlying: str       = Query(settings.DEFAULT_UNDERLYING),
+    duck = Depends(get_duck),
+):
+    """
+    Per-strike VEX and CEX breakdown for frontend heatmap rendering.
+    Returns list of {strike_price, option_type, moneyness_pct, vex_M, cex_M, oi, iv, dte}.
+    Sorted by strike_price ascending.
+    """
+    from optdash.analytics.vex_cex import _get_by_strike
+    return _get_by_strike(duck, trade_date, snap_time, underlying)
