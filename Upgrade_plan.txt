@@ -129,3 +129,8 @@ Session 5: environment.py review  (verify gate scoring post-upgrades)
 Each session → new release note in `Releases/`.
 
 Which session do you want to start with?
+
+---
+
+### Pending Pipeline / Processor Tasks
+- [ ] **Screener Momentum Factor:** The new `S_score` logic in `screener.py` (v2.8.0) relies on `avg_volume_20d` to compute the momentum factor (`volume / avg_volume_20d`). Currently, `avg_volume_20d` is not in `BQ_SELECT_COLS` and is not computed in the processor. Until this column is added to the `options_data` Parquet schema by the pipeline, the momentum factor will silently evaluate to `NULL` (resulting in a $0$ addition to the score). This must be pre-computed and added to the pipeline to activate the momentum signal in live trading.
