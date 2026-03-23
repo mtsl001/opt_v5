@@ -134,8 +134,16 @@ def track_open_positions(
                 # The snap record stores "GATE_ERROR" for auditability.
                 gate = {**gate, "verdict": "GATE_ERROR"}
         else:
+            from datetime import datetime
+            try:
+                t_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
+                e_date = datetime.strptime(trade["expiry_date"], "%Y-%m-%d").date()
+                dte = (e_date - t_date).days
+            except Exception:
+                dte = None
+
             gate = get_environment_score(
-                conn, trade_date, snap_time, underlying, direction=opt_type
+                conn, trade_date, snap_time, underlying, direction=opt_type, dte=dte
             )
         gate_no_go = gate["verdict"] == "NO_GO"
 

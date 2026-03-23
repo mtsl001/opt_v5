@@ -63,8 +63,34 @@ def generate_recommendation(
     direction = dir_res["direction"]
     session   = get_market_session(snap_time)
 
+    # Fetch nearest expiry early to compute DTE for the environment gate (Fix-P1-12/Issue #5)
+    try:
+        nearest_expiry = _nearest_expiry(conn, trade_date, snap_time, underlying)
+    except Exception:
+        logger.warning(
+            "P2-E: _nearest_expiry failed for {} {} {} -- skipping tick",
+            underlying, trade_date, snap_time, exc_info=True,
+        )
+        return None
+
+    if nearest_expiry is None:
+        logger.info(
+            "P1-12: no TIER1 expiry found for {} {} {} -- skipping tick "
+            "(post-rollover window or missing Parquet data)",
+            underlying, trade_date, snap_time,
+        )
+        return None
+
+    from datetime import datetime
+    try:
+        t_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
+        e_date = datetime.strptime(nearest_expiry, "%Y-%m-%d").date()
+        dte = (e_date - t_date).days
+    except Exception:
+        dte = None
+
     # -- Step 2: Gate -- direction-aware so C9 (VEX, 2 pts) scores correctly
-    gate = get_environment_score(conn, trade_date, snap_time, underlying, direction=direction)
+    gate = get_environment_score(conn, trade_date, snap_time, underlying, direction=direction, dte=dte)
 
     # -- Step 3: Supporting analytics (P2-E: each call isolated)
     # iv_data
@@ -124,24 +150,7 @@ def generate_recommendation(
     # propagates here and is caught by the P2-E guard below, which logs
     # with exc_info=True.  This makes errors distinguishable from legitimate
     # no-data conditions (nearest_expiry=None -> INFO log).
-    try:
-        nearest_expiry = _nearest_expiry(conn, trade_date, snap_time, underlying)
-    except Exception:
-        logger.warning(
-            "P2-E: _nearest_expiry failed for {} {} {} -- skipping tick",
-            underlying, trade_date, snap_time, exc_info=True,
-        )
-        return None
-
-    if nearest_expiry is None:
-        # P1-12: no TIER1 expiry available -- post-rollover window or data gap.
-        # Do NOT proceed with max_pain={} as that silences the proximity check.
-        logger.info(
-            "P1-12: no TIER1 expiry found for {} {} {} -- skipping tick "
-            "(post-rollover window or missing Parquet data)",
-            underlying, trade_date, snap_time,
-        )
-        return None
+    # nearest_expiry is already fetched before the gate to pass DTE.
 
     try:
         max_pain = get_max_pain(

@@ -21,6 +21,7 @@ def get_environment_score(
     snap_time:    str,
     underlying:   str,
     direction:    str | None = None,
+    dte:          int | None = None,
     _peak_cache:  dict | None = None,
 ) -> dict:
     """
@@ -39,6 +40,15 @@ def get_environment_score(
     repeated full-day DuckDB scans. Pass None (default) for single API calls.
     """
     try:
+        session = get_market_session(snap_time)
+        if session == MarketSession.OPENING_TURBULENCE:
+            return {
+                "score": 0, "max_score": settings.GATE_MAX_SCORE,
+                "verdict": GateVerdict.NO_GO.value, "conditions": {},
+                "session": session.value,
+                "error": "Blocked by OPENING_TURBULENCE session",
+            }
+
         gex_data = get_net_gex(conn, trade_date, snap_time, underlying,
                                _peak_cache=_peak_cache)
         coc_data = get_coc_latest(conn, trade_date, snap_time, underlying)
@@ -56,6 +66,8 @@ def get_environment_score(
         obi       = atm_obi
         vex_total = vex_data.get("vex_total_M", 0.0)
         dealer_oc = vex_data.get("dealer_oclock", False)
+        
+        is_late_dte1 = (dealer_oc and dte is not None and dte <= 1)
 
         conditions: dict[str, dict] = {}
 
@@ -119,14 +131,15 @@ def get_environment_score(
             c5_threshold = settings.VIX_HIGH_IVP_THRESHOLD   # 35 when VIX elevated
             c5_note_suffix = f" | VIX={india_vix:.1f} HIGH → threshold={c5_threshold}"
         else:
-            c5_threshold   = 50.0
+            c5_threshold   = settings.VIX_NORMAL_IVP_THRESHOLD
             c5_note_suffix = f" | VIX={'N/A' if india_vix is None else f'{india_vix:.1f}'}"
 
-        c5_met = ivp_val < c5_threshold
+        c5_met = False if is_late_dte1 else (ivp_val < c5_threshold)
+        c5_pts = 0 if is_late_dte1 else 1
         conditions["ivp_cheap"] = {
             "met": c5_met, "value": round(ivp_val, 1),
-            "points": 1,
-            "note": f"IVP = {ivp_val:.0f}th pct{c5_note_suffix}"
+            "points": c5_pts,
+            "note": f"IVP = {ivp_val:.0f}th pct{c5_note_suffix}" + (" (Skipped - Dealer O'Clock)" if is_late_dte1 else "")
         }
 
         # C6: ATM OBI significant (1 pt)
@@ -142,15 +155,27 @@ def get_environment_score(
         }
 
         # C7: IV term structure not backwardation (1 pt)
-        ts     = iv_data.get("shape", "FLAT")
-        c7_met = ts != "BACKWARDATION"
+        ts = iv_data.get("shape")
+        if is_late_dte1:
+            c7_score = 0
+            c7_note = "Term structure skipped (Dealer O'Clock)"
+            c7_met = False
+        elif ts is None:
+            c7_score = 0
+            c7_note = "Term structure data unavailable"
+            c7_met = False
+        else:
+            c7_score = -1 if ts == "BACKWARDATION" else 0
+            c7_met = (ts == "BACKWARDATION")
+            c7_note = f"Shape = {ts} {'⚠️ PENALTY -1' if ts == 'BACKWARDATION' else ''}"
+
         conditions["term_structure_ok"] = {
-            "met": c7_met, "value": ts,
-            "points": 1, "note": f"Shape = {ts}"
+            "met": c7_met, "value": ts or "UNKNOWN",
+            "points": c7_score, "note": c7_note,
+            "is_penalty": True
         }
 
         # C8: Session not midday chop (1 pt)
-        session = get_market_session(snap_time)
         c8_met  = session != MarketSession.MIDDAY_CHOP
         conditions["session_ok"] = {
             "met": c8_met, "value": session.value,
@@ -175,40 +200,75 @@ def get_environment_score(
             c9_met = True
         elif direction == "PE" and vex_total < -vex_thr:
             c9_met = True
+        c9_pts = 4 if is_late_dte1 else 2
         conditions["vex_aligned"] = {
             "met": c9_met, "value": round(vex_total, 2),
-            "points": 2, "note": "VEX mechanical alignment ** (2 pts)"
+            "points": c9_pts, "note": f"VEX mechanical alignment ** ({c9_pts} pts)" + (" (Dealer O'Clock x2)" if is_late_dte1 else "")
         }
 
         # C10: Not Dealer O'Clock on DTE=1 * (1 pt bonus if safe)
-        c10_met = not dealer_oc
+        if is_late_dte1:
+            c10_met = True
+            c10_val = "CHARM_BONUS"
+        else:
+            c10_met = not dealer_oc
+            c10_val = "SAFE" if c10_met else "DEALER_OCLOCK"
+
         conditions["not_charm_distortion"] = {
             "met": c10_met,
-            "value": "SAFE" if c10_met else "DEALER_OCLOCK",
+            "value": c10_val,
             "points": 1,
-            "note": "Dealer O'Clock guard *"
+            "note": "Dealer O'Clock guard *" + (" (Inverted to bonus)" if is_late_dte1 else "")
         }
 
-        _raw_max = sum(c["points"] for c in conditions.values())
-        # RuntimeError replaces assert — fires even under python -O.
-        # Caught by the outer except → logged as FATAL → returns NO_GO,
-        # blocking all recommendations until config.py is corrected.
-        if _raw_max > settings.GATE_MAX_SCORE:
+        # Bucket evaluation
+        structure_pts = (
+            (conditions["gex_declining"]["points"] if conditions["gex_declining"]["met"] else 0) +
+            (conditions["vex_aligned"]["points"] if conditions["vex_aligned"]["met"] else 0)
+        )
+        momentum_pts = (
+            (conditions["vcoc_signal"]["points"] if conditions["vcoc_signal"]["met"] else 0) +
+            (conditions["fut_bs_ratio"]["points"] if conditions["fut_bs_ratio"]["met"] else 0) +
+            (conditions["obi_negative"]["points"] if conditions["obi_negative"]["met"] else 0)
+        )
+        context_pts = (
+            (conditions["pcr_divergence"]["points"] if conditions["pcr_divergence"]["met"] else 0) +
+            (conditions["ivp_cheap"]["points"] if conditions["ivp_cheap"]["met"] else 0) +
+            (conditions["session_ok"]["points"] if conditions["session_ok"]["met"] else 0) +
+            (conditions["not_charm_distortion"]["points"] if conditions["not_charm_distortion"]["met"] else 0)
+        )
+
+        bonus_score   = sum(c["points"] for c in conditions.values() if c["met"] and not c.get("is_penalty"))
+        penalty_score = sum(c["points"] for c in conditions.values() if c["met"] and c.get("is_penalty"))
+        score = max(0, min(bonus_score + penalty_score, settings.GATE_MAX_SCORE))
+
+        _raw_max = sum(c["points"] for c in conditions.values() if not c.get("is_penalty"))
+        if _raw_max > settings.GATE_MAX_SCORE + 2: # +2 dynamic padding for DTE=1
             raise RuntimeError(
                 f"Gate conditions sum to {_raw_max} pts but "
                 f"GATE_MAX_SCORE={settings.GATE_MAX_SCORE}. "
                 "Update GATE_MAX_SCORE and re-calibrate thresholds in config.py."
             )
 
-        score   = min(
-            sum(c["points"] for c in conditions.values() if c["met"]),
-            settings.GATE_MAX_SCORE,
-        )
-        verdict = (
-            GateVerdict.GO.value   if score >= settings.GATE_GO_THRESHOLD   else
-            GateVerdict.WAIT.value if score >= settings.GATE_WAIT_THRESHOLD  else
-            GateVerdict.NO_GO.value
-        )
+        snap_vol     = gex_data.get("snap_volume", 0)
+        avg_snap_vol = gex_data.get("avg_snap_volume_20d", 1)
+        volume_ok    = snap_vol > 0.30 * avg_snap_vol
+
+        if score >= settings.GATE_GO_THRESHOLD:
+            verdict = GateVerdict.GO.value
+        elif score >= settings.GATE_WAIT_THRESHOLD:
+            verdict = GateVerdict.WAIT.value
+        else:
+            verdict = GateVerdict.NO_GO.value
+
+        if verdict == GateVerdict.GO.value:
+            if structure_pts < 1 or momentum_pts < 1 or context_pts < 1:
+                verdict = GateVerdict.WAIT.value
+            if not volume_ok:
+                verdict = GateVerdict.WAIT.value
+        elif verdict == GateVerdict.WAIT.value:
+            if not volume_ok:
+                verdict = GateVerdict.WAIT.value
 
         return {
             "score":      score,
@@ -241,6 +301,8 @@ def get_market_session(snap_time: str) -> MarketSession:
     string comparison pitfalls (e.g. '9:15' < '09:30' is False as strings).
     """
     s = _snap_to_min(snap_time)
+    if s <= _snap_to_min(settings.SESSION_OPENING_TURBULENCE_END):
+        return MarketSession.OPENING_TURBULENCE
     if s <= _snap_to_min(settings.SESSION_OPENING_END):
         return MarketSession.OPENING
     if s <= _snap_to_min(settings.SESSION_MIDDAY_START):

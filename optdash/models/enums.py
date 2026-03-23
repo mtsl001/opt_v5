@@ -15,6 +15,7 @@ class GateVerdict(str, Enum):
 
 
 class MarketSession(str, Enum):
+    OPENING_TURBULENCE = "OPENING_TURBULENCE"  # 09:15 – 09:30
     OPENING         = "OPENING"          # 09:15 – 10:15
     MIDMORNING      = "MIDMORNING"        # 10:15 – 11:30
     MIDDAY_CHOP     = "MIDDAY_CHOP"       # 11:30 – 13:00

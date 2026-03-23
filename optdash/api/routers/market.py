@@ -75,4 +75,18 @@ def environment(
     direction:  str | None = Query(None),
     duck = Depends(get_duck),
 ):
-    return get_environment_score(duck, trade_date, snap_time, underlying, direction)
+    dte = None
+    try:
+        row = duck.execute(
+            "SELECT MIN(expiry_date) FROM options_data WHERE trade_date=? AND snap_time=? AND underlying=? AND expiry_tier='TIER1' AND expiry_date >= ?",
+            [trade_date, snap_time, underlying, trade_date]
+        ).fetchone()
+        if row and row[0]:
+            from datetime import datetime
+            t_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
+            e_date = datetime.strptime(row[0], "%Y-%m-%d").date()
+            dte = (e_date - t_date).days
+    except Exception:
+        pass
+
+    return get_environment_score(duck, trade_date, snap_time, underlying, direction, dte)

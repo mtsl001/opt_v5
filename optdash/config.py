@@ -87,7 +87,8 @@ class Settings(BaseSettings):
     # string comparisons throughout the codebase.
     @field_validator(
         "MARKET_OPEN", "MARKET_CLOSE", "EOD_FORCE_CLOSE_TIME", "EOD_SWEEP_TIME",
-        "SESSION_OPENING_END", "SESSION_MIDDAY_START", "SESSION_MIDDAY_END",
+        "SESSION_OPENING_TURBULENCE_END", "SESSION_OPENING_END",
+        "SESSION_MIDDAY_START", "SESSION_MIDDAY_END",
         "SESSION_CLOSING_START", "DEALER_OCLOCK_START",
         mode="before",
     )
@@ -459,8 +460,9 @@ class Settings(BaseSettings):
     # VIX_HIGH_THRESHOLD:     VIX above this tightens Gate C5 IVP requirement.
     # VIX_HIGH_IVP_THRESHOLD: In high-VIX regime, IVP must be < 35 (not < 50)
     #                         to score the "IV cheap" gate point.
-    VIX_HIGH_THRESHOLD:     float = 20.0
-    VIX_HIGH_IVP_THRESHOLD: float = 35.0
+    VIX_HIGH_THRESHOLD:       float = 20.0
+    VIX_HIGH_IVP_THRESHOLD:   float = 35.0
+    VIX_NORMAL_IVP_THRESHOLD: float = 50.0
 
     # Risk-free rate for exact BSM Greek computation.
     # Use RBI repo rate (annualised decimal). Update when RBI changes policy rate.
@@ -533,10 +535,10 @@ class Settings(BaseSettings):
     W_GAMMA:      float = 1.0
     W_VEGA:       float = 1.0
     W_MOMENTUM:   float = 1.0
-    # Star thresholds calibrated against the 0-~180 S_score scale.
-    STAR_4_THRESHOLD: float = 120.0  # >=67% of max - excellent
-    STAR_3_THRESHOLD: float =  95.0  # >=53% of max - good
-    STAR_2_THRESHOLD: float =  70.0  # >=40% of max - acceptable
+    # Star thresholds calibrated against the 0-~150 S_score scale (adjusting for missing W_MOMENTUM factor).
+    STAR_4_THRESHOLD: float = 100.0  # >=67% of max - excellent
+    STAR_3_THRESHOLD: float =  80.0  # >=53% of max - good
+    STAR_2_THRESHOLD: float =  60.0  # >=40% of max - acceptable
 
     # -- Environment Gate
     GATE_GO_THRESHOLD:   int = 7
@@ -544,8 +546,9 @@ class Settings(BaseSettings):
     GATE_MAX_SCORE:      int = 11
 
     # -- Session Boundaries
-    SESSION_OPENING_END:   str = "10:15"
-    SESSION_MIDDAY_START:  str = "11:30"
+    SESSION_OPENING_TURBULENCE_END: str = "09:30"
+    SESSION_OPENING_END:            str = "10:15"
+    SESSION_MIDDAY_START:           str = "11:30"
     SESSION_MIDDAY_END:    str = "13:00"
     # SESSION_CLOSING_START marks the AFTERNOON→CLOSING_CRUSH boundary (C8).
     # See DEALER_OCLOCK_START below for the related DTE=1 C10 boundary which

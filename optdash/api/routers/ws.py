@@ -123,8 +123,22 @@ async def _build_payload(
         direction = open_t[0]["option_type"] if open_t else None
         await asyncio.sleep(0)  # yield: allow other handlers to run
 
+        dte = None
+        try:
+            row = duck.execute(
+                "SELECT MIN(expiry_date) FROM options_data WHERE trade_date=? AND snap_time=? AND underlying=? AND expiry_tier='TIER1' AND expiry_date >= ?",
+                [trade_date, snap_time, underlying, trade_date]
+            ).fetchone()
+            if row and row[0]:
+                from datetime import datetime
+                t_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
+                e_date = datetime.strptime(row[0], "%Y-%m-%d").date()
+                dte = (e_date - t_date).days
+        except Exception:
+            pass
+
         env = get_environment_score(duck, trade_date, snap_time, underlying,
-                                    direction=direction)
+                                    direction=direction, dte=dte)
         await asyncio.sleep(0)  # yield: env score runs 7 aggregations
 
         gex = get_net_gex(duck, trade_date, snap_time, underlying)

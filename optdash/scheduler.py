@@ -267,10 +267,19 @@ def _build_gate_cache(
             # will silently use the first leg's direction.
             continue
         try:
+            from datetime import datetime
+            t_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
+            e_date = datetime.strptime(t["expiry_date"], "%Y-%m-%d").date()
+            dte = (e_date - t_date).days
+        except Exception:
+            dte = None
+
+        try:
             cache[underlying] = get_environment_score(
                 duck, trade_date, snap_time,
                 underlying,
                 direction=t["option_type"],
+                dte=dte,
                 _peak_cache=_gex_peak_cache,
             )
         except Exception as e:
