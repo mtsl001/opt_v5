@@ -75,6 +75,11 @@ def run_pre_flight(
                 f"DTE<=1 requires confidence >= {settings.PREFLIGHT_DTE1_MIN_CONFIDENCE}%, "
                 f"got {confidence}%"
             )
+        direction_margin = gex_data.get("direction_margin", 0)  # pass from recommender
+        if direction_margin < settings.PREFLIGHT_DTE1_MIN_MARGIN:  # e.g. 5
+            failures.append(
+                f"DTE<=1 requires margin >= {settings.PREFLIGHT_DTE1_MIN_MARGIN}, got {direction_margin}"
+            )
 
     # Rule 8 (renumbered 7 after Rule 6 removal): Dealer O'Clock hard block on DTE<=1
     # Fix PF-1: explicit None guard so DTE=0 (expiry morning, highest-risk window)

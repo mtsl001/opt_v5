@@ -142,7 +142,7 @@ def get_environment_score(
         # For PE trades positive OBI = retail panic calls = contrarian bearish.
         # Both are valid entry signals on an options BUYING dashboard.
         c6_met = abs(obi) > settings.OBI_THRESHOLD
-        conditions["obi_negative"] = {
+        conditions["obi_significant"] = {
             "met": c6_met, "value": round(obi, 4),
             "points": 1, "note": f"ATM OBI = {obi:+.4f}"
         }
@@ -221,7 +221,7 @@ def get_environment_score(
         )
         momentum_pts = (
             (conditions["vcoc_fut_combined"]["points"] if conditions["vcoc_fut_combined"]["met"] else 0) +
-            (conditions["obi_negative"]["points"] if conditions["obi_negative"]["met"] else 0)
+            (conditions["obi_significant"]["points"] if conditions["obi_significant"]["met"] else 0)
         )
         context_pts = (
             (conditions["pcr_divergence"]["points"] if conditions["pcr_divergence"]["met"] else 0) +

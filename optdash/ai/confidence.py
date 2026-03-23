@@ -20,7 +20,7 @@ def compute_confidence(
     Bucket 4: Historical Perf      (max 10 pts)
     """
     margin       = direction_result.get("margin", 0)
-    signal_count = len(direction_result.get("signals", []))
+    unique_source_count = direction_result.get("unique_source_count", len(direction_result.get("signals", [])))
     direction    = direction_result.get("direction", "")
 
     # Bucket 1: signal strength
@@ -29,9 +29,9 @@ def compute_confidence(
     # the total beyond the cap -- the signal-diversity term was effectively dead at all
     # high-conviction setups (exactly when it should reward wide signal agreement most).
     # New formula: lowering the margin coefficient to 7 creates headroom so
-    # signal_count*3 contributes at margin<=5 (e.g. margin=3, count=5: 21+15=36 vs 24).
+    # unique_source_count*3 contributes at margin<=5 (e.g. margin=3, count=5: 21+15=36 vs 24).
     # Max score still hits cap at margin=6+ so genuinely dominant setups are unaffected.
-    b1 = min(40, margin * 7 + signal_count * 3)
+    b1 = min(40, margin * 7 + unique_source_count * 3)
 
     # Bucket 2: gate adequacy — P4-F5: corrected multiplier from 30 → 25.
     gate_max = settings.GATE_MAX_SCORE or 10

@@ -40,12 +40,14 @@ def get_directional_bias(
 
         # ── Signal 1: V_CoC velocity (weight 3) ───────────────────────────────────────────
         vcoc        = coc.get("v_coc_15m") or 0
-        vcoc_active = _is_vcoc_spike_active(conn, trade_date, snap_time, underlying)
-        if vcoc > settings.VCOC_BULL_THRESHOLD or (vcoc_active and vcoc > 0):
-            signals.append({"signal": "VCOC_BULL", "weight": 3,
+        spike_age   = _vcoc_spike_age(conn, trade_date, snap_time, underlying)
+        if vcoc > settings.VCOC_BULL_THRESHOLD or (spike_age > 0 and vcoc > 0):
+            decayed_weight = max(1, 4 - spike_age) if spike_age > 0 else 3
+            signals.append({"signal": "VCOC_BULL", "weight": decayed_weight, "spike_age": spike_age,
                              "direction": Direction.CE.value, "value": vcoc})
-        elif vcoc < settings.VCOC_BEAR_THRESHOLD or (vcoc_active and vcoc < 0):
-            signals.append({"signal": "VCOC_BEAR", "weight": 3,
+        elif vcoc < settings.VCOC_BEAR_THRESHOLD or (spike_age > 0 and vcoc < 0):
+            decayed_weight = max(1, 4 - spike_age) if spike_age > 0 else 3
+            signals.append({"signal": "VCOC_BEAR", "weight": decayed_weight, "spike_age": spike_age,
                              "direction": Direction.PE.value, "value": vcoc})
 
         # ── Signal 2: Futures OBI (weight 2) ───────────────────────────────────────
@@ -81,12 +83,17 @@ def get_directional_bias(
 
         # ── Signal 5: PCR divergence (weight 1) ───────────────────────────────────────
         div = pcr.get("pcr_divergence", 0)
-        if div > settings.PCR_DIV_BULL_THRESHOLD:
-            signals.append({"signal": "PCR_RETAIL_PUTS", "weight": 1,
-                             "direction": Direction.CE.value, "value": div})
-        elif div < settings.PCR_DIV_BEAR_THRESHOLD:
-            signals.append({"signal": "PCR_RETAIL_CALLS", "weight": 1,
-                             "direction": Direction.PE.value, "value": div})
+
+        # Issue #5: Cap combined V_CoC and Futures OBI weight at 4
+        vcoc_fired = next((s for s in signals if "VCOC" in s["signal"]), None)
+        fobi_fired = next((s for s in signals if "FUT_OBI" in s["signal"]), None)
+        if vcoc_fired and fobi_fired and vcoc_fired["direction"] == fobi_fired["direction"]:
+            fobi_fired["weight"] = 1  # cap combined to 3+1=4 instead of 3+2=5
+
+        # Count unique sources
+        unique_source_count = len(signals)
+        if vcoc_fired and fobi_fired and vcoc_fired["direction"] == fobi_fired["direction"]:
+            unique_source_count -= 1
 
         ce_weight = sum(s["weight"] for s in signals if s["direction"] == Direction.CE.value)
         pe_weight = sum(s["weight"] for s in signals if s["direction"] == Direction.PE.value)
@@ -95,10 +102,14 @@ def get_directional_bias(
         if ce_weight == 0 and pe_weight == 0:
             return {"direction": Direction.NEUTRAL.value, "ce_weight": 0,
                     "pe_weight": 0, "margin": 0, "signals": [],
-                    "vex_data": vex}
+                    "vex_data": vex, "conviction": "NEUTRAL",
+                    "unique_source_count": unique_source_count}
 
-        # Tie -- contradictory signals cancel, no tradeable edge
-        if ce_weight == pe_weight:
+        MIN_DIRECTION_MARGIN = 3
+        margin = abs(ce_weight - pe_weight)
+
+        # Issue #1: No Minimum Margin Threshold (Low-Conviction Winner Trap)
+        if margin < MIN_DIRECTION_MARGIN:
             return {
                 "direction": Direction.NEUTRAL.value,
                 "ce_weight": ce_weight,
@@ -106,18 +117,58 @@ def get_directional_bias(
                 "margin":    0,
                 "signals":   signals,
                 "vex_data":  vex,
+                "conviction": "NEUTRAL",
+                "unique_source_count": unique_source_count,
             }
 
         direction = Direction.CE.value if ce_weight > pe_weight else Direction.PE.value
+
+        # Issue #2: PCR Divergence Pollutes the Momentum Vote Pool
+        pcr_modifier = 1.0
+        if div > settings.PCR_DIV_BULL_THRESHOLD:
+            pcr_modifier = 1.2 if direction == Direction.CE.value else 0.85
+        elif div < settings.PCR_DIV_BEAR_THRESHOLD:
+            pcr_modifier = 1.2 if direction == Direction.PE.value else 0.85
+        margin_adjusted = round(margin * pcr_modifier, 2)
+
+        # Issue #3: VEX Structural Veto
+        vex_opposition_mult = getattr(settings, 'VEX_VETO_MULTIPLIER', 2.5)
+        vex_thr = settings.VEX_THRESHOLDS.get(underlying, settings.VEX_BULL_THRESHOLD)
+        vex_total = vex.get("vex_total_M", 0) or 0
+        veto = None
+        
+        if direction == Direction.CE.value and vex_total < -(vex_thr * vex_opposition_mult):
+            direction = Direction.NEUTRAL.value
+            veto = "VEX_WALL_BEAR"
+            margin_adjusted = 0
+        elif direction == Direction.PE.value and vex_total > (vex_thr * vex_opposition_mult):
+            direction = Direction.NEUTRAL.value
+            veto = "VEX_WALL_BULL"
+            margin_adjusted = 0
+
+        # Issue #6: Conviction Tier
+        if direction == Direction.NEUTRAL.value:
+            conviction = "NEUTRAL"
+        elif margin_adjusted >= 6:
+            conviction = "STRONG"
+        elif margin_adjusted >= 3:
+            conviction = "MODERATE"
+        else:
+            conviction = "WEAK"
+
         return {
             "direction": direction,
             "ce_weight": ce_weight,
             "pe_weight": pe_weight,
-            "margin":    abs(ce_weight - pe_weight),
+            "margin":    margin_adjusted,
             "signals":   signals,
             # Fix-G: expose vex_data so recommender.py can read the already-computed
             # VEX snapshot without a second get_vex_cex_current() round-trip.
             "vex_data":  vex,
+            "pcr_modifier": pcr_modifier,
+            "veto": veto,
+            "conviction": conviction,
+            "unique_source_count": unique_source_count,
         }
 
     except Exception as e:
@@ -135,12 +186,12 @@ def get_directional_bias(
                 "pe_weight": 0, "margin": 0, "signals": []}
 
 
-def _is_vcoc_spike_active(
+def _vcoc_spike_age(
     conn:       duckdb.DuckDBPyConnection,
     trade_date: str,
     snap_time:  str,
     underlying: str,
-) -> bool:
+) -> int:
     """True if any of the last VCOC_SPIKE_EXPIRY_SNAPS snaps had a V_CoC spike.
 
     Fix-F: replaced N+1 query pattern with a single batch fetch.
@@ -185,7 +236,7 @@ def _is_vcoc_spike_active(
         # N most-recent target snaps are the last N items in the ASC list
         target_snaps = all_times[-n:]
 
-        for t in reversed(target_snaps):   # most-recent first; exit early on spike
+        for i, t in enumerate(reversed(target_snaps), start=1):   # most-recent first; exit early on spike
             h2, m2 = map(int, t.split(":"))
             t_min  = h2 * 60 + m2
             if t_min < 15:
@@ -199,9 +250,9 @@ def _is_vcoc_spike_active(
             if anchor is None:
                 continue
             if abs(coc_map[t] - coc_map[anchor]) > threshold:
-                return True
+                return i
 
-        return False
+        return 0
 
     except Exception:
-        return False
+        return 0

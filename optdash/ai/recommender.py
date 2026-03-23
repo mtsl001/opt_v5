@@ -219,7 +219,9 @@ def generate_recommendation(
         gate_score=gate["score"],
         confidence=confidence,
         strike=strike,
-        gex_data={**gex_data, "max_pain_distance_pct": max_pain.get("distance_pct", 99)},
+        gex_data={**gex_data, 
+                  "max_pain_distance_pct": max_pain.get("distance_pct", 99),
+                  "direction_margin": dir_res.get("margin", 0)},
         session=session,
         dealer_oclock=dealer_oc,
     )

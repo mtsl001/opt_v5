@@ -349,6 +349,7 @@ class Settings(BaseSettings):
         "MIDCPNIFTY": 0.15,
         "NIFTYNXT50": 0.15,
     }
+    VEX_VETO_MULTIPLIER: float = 2.5
     CEX_STRONG_BID:    float = 20.0
     CEX_BID:           float = 5.0
     CEX_PRESSURE:      float = -20.0
@@ -563,6 +564,7 @@ class Settings(BaseSettings):
     PREFLIGHT_MIN_SSCORE:          float = 60.0
     PREFLIGHT_DTE1_MIN_GATE:       int   = 7
     PREFLIGHT_DTE1_MIN_CONFIDENCE: int   = 65
+    PREFLIGHT_DTE1_MIN_MARGIN:     int   = 5
 
     AI_SL_PCT:           float = 0.35
     AI_TARGET_MULT:      float = 1.50
