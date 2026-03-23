@@ -1,163 +1,102 @@
-Good. Now I have the full picture of all changes. Here is the complete verification report.
+Now I have all the latest file contents. Here is the complete, thorough re-review.
 
 ***
 
-# Fix Verification Report — Environment Gate
+## Full Re-Review — All 5 Raised Issues + Fresh Scan
 
-## ✅ CONFIRMED FIXED
+### Previously Raised Issues (ISSUE-A through ISSUE-E)
 
-### Issue #5 — `dte` Added to Function Signature
-**Status: ✅ Fully Fixed**
+| ID | Issue | Status |
+|----|-------|--------|
+| ISSUE-A | `session_adjusted` wrong on cold-start | ✅ **Fixed** — `raw_pre_session = raw` captured before session block; flag is now `raw != raw_pre_session`  |
+| ISSUE-B | `pcr_modifier` absent on exception path | ✅ **Documented** — comment added: *"Defaults to 1.0 (no confirm) if missing on VEX/exception paths"*  |
+| ISSUE-C | C2 saturation above GO undocumented | ✅ **Fixed** — comment added: *"gate_score > GO_THRESHOLD also yields full 35 — bonus beyond GO is not rewarded in C2"*  |
+| ISSUE-D | Cold-start rescale hardcoded `90.0` | ✅ **Fixed** — now `B_ACTIVE_MAX = 40 + 25 + 25` with comment, used as divisor  |
+| ISSUE-E | `cold_start` not journalled | ✅ **Fixed** — `buckets["cold_start"] = conf_result.get("cold_start", False)` written into `conf_buckets` JSON  |
 
-`dte: int | None = None` is now correctly present as the 6th parameter in `get_environment_score()` , placed between `direction` and `_peak_cache`. The `is_late_dte1` flag (`dealer_oc and dte is not None and dte <= 1`) properly guards all regime-switching logic so that when `dte=None` (API callers), none of the DTE=1 branches fire. The `dte is not None` guard prevents silent misfires.
-
-***
-
-### Issue #2 — C10 Dealer O'Clock Contradiction
-**Status: ✅ Fully Fixed**
-
-The regime switch is correctly implemented :
-- C5 (IV Cheap): `c5_met = False if is_late_dte1` — deactivated during Dealer O'Clock ✅
-- C7 (Term Structure): explicitly skipped with `"Term structure skipped (Dealer O'Clock)"` note ✅
-- C9 (VEX): weight dynamically doubles to 4 pts during `is_late_dte1` (`c9_pts = 4 if is_late_dte1 else 2`) ✅
-- C10: inverted to a bonus (`c10_met = True`, value `"CHARM_BONUS"`) during DTE=1 Dealer O'Clock ✅
+All 5 prior issues are confirmed resolved. Now the fresh scan:
 
 ***
 
-### Issue #6 — Opening Turbulence Guard (9:15–9:30)
-**Status: ✅ Fully Fixed**
+### 🔴 NEW ISSUE-1 — Quality Score Receives Inflated Confidence During Cold-Start
 
-`OPENING_TURBULENCE` added to `MarketSession` enum  with correct comment (`# 09:15 – 09:30`). `get_market_session()` now checks `SESSION_OPENING_TURBULENCE_END` as its first boundary . The hard-return at the top of `get_environment_score()` immediately returns `NO_GO` with `"error": "Blocked by OPENING_TURBULENCE session"` — no analytics queries are even executed during this window, which is the correct and efficient approach.
+**File:** `optdash/ai/recommender.py` + `optdash/ai/quality.py`
 
-`SESSION_OPENING_TURBULENCE_END: str = "09:30"` is added to `config.py`  and included in the `_check_hhmm` validator, ensuring it must be zero-padded HH:MM format.
+`compute_confidence()` during cold-start returns a rescaled `confidence` — e.g., 3 active buckets scoring `b1+b2+b3 = 72` → rescaled to `int(72 × 100/90) = 80`.  This inflated confidence is then passed directly to `compute_quality_score()` as C3, where `c3 = min(30, (80/100) × 30) = 24 pts`.  A truly mediocre trade with zero historical edge gets a Quality Grade bumped up by the cold-start multiplier. The `cold_start` flag is available in `conf_result`  but is **not passed to `compute_quality_score()`**, so the Quality Score has no way to adjust. The minimum quality gate `PREFLIGHT_MIN_QUALITY_SCORE = 50`  may be cleared by inflated cold-start confidence that a non-cold-start equivalent trade wouldn't clear.
 
-***
-
-### Issue #7 — C7 Silent Null + Default-Pass Reclassified as Penalty
-**Status: ✅ Fully Fixed**
-
-The old `ts = iv_data.get("shape", "FLAT")` default is gone. Now `ts = iv_data.get("shape")` with proper three-branch logic :
-- `is_late_dte1` → skipped entirely (0 pts, `False`)
-- `ts is None` → data unavailable, scores 0, no free point, no false penalty ✅
-- BACKWARDATION → `c7_score = -1`, `c7_met = True`, `"is_penalty": True` flag set ✅
-- Otherwise → 0 pts (neutral, not a bonus)
+**Fix required:** Pass `cold_start` to `compute_quality_score()` and use the raw `b1+b2+b3` (pre-rescale) sum as C3 input when `cold_start=True`, or apply a proportional C3 penalty.
 
 ***
 
-### Issue #9 — C5 IVP Hardcoded 50.0 Made Configurable
-**Status: ✅ Fully Fixed**
+### 🔴 NEW ISSUE-2 — `B_ACTIVE_MAX` Is a Magic Constant, Not Config-Derived
 
-`VIX_NORMAL_IVP_THRESHOLD: float = 50.0` is now in `config.py` . The `else` branch in `environment.py` now correctly reads `settings.VIX_NORMAL_IVP_THRESHOLD` instead of the old hardcoded literal .
-
-***
-
-### Issue #10 — Scoring Engine Extended for Penalty Points
-**Status: ✅ Fully Fixed**
-
-The scoring engine now correctly separates bonus from penalty logic :
-```python
-bonus_score   = sum(c["points"] for c in conditions.values() if c["met"] and not c.get("is_penalty"))
-penalty_score = sum(c["points"] for c in conditions.values() if c["met"] and c.get("is_penalty"))
-score = max(0, min(bonus_score + penalty_score, settings.GATE_MAX_SCORE))
-```
-The `_raw_max` validation also correctly excludes penalty conditions from its sum (`if not c.get("is_penalty")`), with a `+2` dynamic padding to allow for the DTE=1 VEX doubling.
-
-***
-
-### Issue #4 — Volume Guard Added
-**Status: ✅ Functionally Implemented (with one residual concern — see below)**
-
-The volume guard logic is present :
-```python
-snap_vol     = gex_data.get("snap_volume", 0)
-avg_snap_vol = gex_data.get("avg_snap_volume_20d", 1)
-volume_ok    = snap_vol > 0.30 * avg_snap_vol
-```
-Volume check correctly downgrades GO → WAIT when the volume floor is not met. ✅
-
-***
-
-### Issue #1 — Bucket Weighting Implemented
-**Status: ✅ Implemented**
-
-Bucket calculations are present for all three buckets :
-- *Structure*: `gex_declining` + `vex_aligned`
-- *Momentum*: `vcoc_signal` + `fut_bs_ratio` + `obi_negative`
-- *Context*: `pcr_divergence` + `ivp_cheap` + `session_ok` + `not_charm_distortion`
-
-The verdict downgrade `if structure_pts < 1 or momentum_pts < 1 or context_pts < 1` correctly blocks momentum-only "GO" verdicts. ✅
-
-***
-
-### Issue #8 — Star Thresholds Recalibrated to 150-Scale
-**Status: ✅ Fixed**
-
-Star thresholds reverted to 150-scale (acknowledging `avg_volume_20d` is still unresolved) :
-```
-STAR_4_THRESHOLD: 100.0  (was 120.0)
-STAR_3_THRESHOLD:  80.0  (was 95.0)
-STAR_2_THRESHOLD:  60.0  (was 70.0)
-```
-Comment confirms rationale: `"adjusting for missing W_MOMENTUM factor"`. ✅
-
-***
-
-## ⚠️ RESIDUAL ISSUES — Require Attention
-
-### Issue #3 — C2+C3 Double-Counting: NOT Addressed
-**Status: ❌ Unfixed**
-
-The C2/C3 combined-gate fix was not implemented. Both conditions still score independently — `vcoc_signal` (1 pt) and `fut_bs_ratio` (1 pt) remain separate entries in the Momentum bucket . The bucket system from Issue #1 partially mitigates this (you only need 1 Momentum point for a GO, not 3), but when scoring total points, a single institutional flow event still awards 2 Momentum points that inflate the total score. This is lower-priority now given bucket gating, but worth tracking.
-
-***
-
-### Issue #4 (Partial) — Volume Guard Default is Unsafe
-**Status: ⚠️ Logic Risk**
+**File:** `optdash/ai/confidence.py`
 
 ```python
-avg_snap_vol = gex_data.get("avg_snap_volume_20d", 1)  # default = 1
+B_ACTIVE_MAX = 40 + 25 + 25  # B1 + B2 + B3 max points
 ```
-The `avg_snap_vol` default of `1` means: if `gex_data` doesn't expose `avg_snap_volume_20d` (which it currently may not — this key is from the pipeline dependency noted in v2.8.1 ), then `snap_vol > 0.30 * 1 = 0.3`. Any non-zero snap volume (even a single tick) will pass `volume_ok = True`. The guard **silently becomes a no-op** when the data key is missing. Should be:
+These three numbers (`40`, `25`, `25`) are hardcoded inline.  The actual per-bucket caps are enforced by separate `min()` calls (`min(40,...)`, `min(25,...)`, `min(25,...)`), which are also hardcoded. If any of those caps is ever changed (e.g., B3 raised from 25 to 30 for a new structural signal), `B_ACTIVE_MAX` silently drifts and the rescaling formula produces wrong results. Unlike the prior `90.0` fix, the constants are still not derived from a single source of truth — they're just moved from a single number to a sum of three numbers. The docstring says *"max 40 / 25 / 25"* but these are not config fields.
+
+**Fix required:** Either promote the bucket maxes to config constants (`CONFIDENCE_B1_MAX`, `CONFIDENCE_B2_MAX`, `CONFIDENCE_B3_MAX`) so `B_ACTIVE_MAX` auto-derives, or at minimum add a `# SYNC: must match min() caps above` comment on all three occurrences so a future editor knows to change both places.
+
+***
+
+### 🟠 NEW ISSUE-3 — `CLOSING_CRUSH` Cap Applied After Cold-Start Rescaling, Masking the State
+
+**File:** `optdash/ai/confidence.py`
+
+The `CLOSING_CRUSH` cap is:
 ```python
-avg_snap_vol = gex_data.get("avg_snap_volume_20d")
-if avg_snap_vol is None or avg_snap_vol == 0:
-    volume_ok = True   # Cannot evaluate — fail open (or fail closed — your design choice)
-    # Better: log a warning so you know the guard isn't operating
+if session == MarketSession.CLOSING_CRUSH:
+    raw = min(raw, settings.SESSION_CLOSING_CONFIDENCE_CAP)  # = 65
 ```
+When `cold_start=True`, `raw` has already been rescaled upward (×1.111).  If the rescaled raw is e.g. 88 and the cap clips it to 65, `session_adjusted = True` is correctly set. However, the `conf_buckets` written to the journal show the **un-capped** bucket values (b1, b2, b3, b4), while the stored `confidence = 65`. A future analyst querying the journal cannot reconstruct whether 65 came from the cap or from naturally scoring 65. The `session_adjusted=True` flag helps, but doesn't identify *which* adjustment fired (midday penalty vs closing cap). Both adjustments are binary `bool` but conflated into one flag.
+
+**Fix required (minor):** Add `"session": session.value` already journalled ✅, but also add `"session_adjusted_reason"` (e.g. `"CLOSING_CAP"` / `"MIDDAY_PENALTY"` / `None`) to the returned dict for audit clarity.
 
 ***
 
-### Issue #1 (Partial) — C7 Term Structure Excluded from Structure Bucket
-**Status: ⚠️ Architectural Gap**
+### 🟡 NEW ISSUE-4 — `quality_score` Stored as Grade Only, Raw Score Not Journalled
 
-The C7 penalty (`is_penalty: True`) is not included in any bucket's point calculation . `structure_pts`, `momentum_pts`, and `context_pts` are all computed from `"met" and not c.get("is_penalty")` implicitly (they reference specific keys). This means a BACKWARDATION penalty of −1 reduces the total `score`, but the bucket evaluation still sees the same `structure_pts`/`context_pts` values — the penalty is invisible to the bucket gate logic. A BACKWARDATION environment can still pass the per-bucket gate check and have its verdict downgraded only by the numerical score, not the bucket check. This is acceptable but worth documenting as an intentional design choice.
+**File:** `optdash/ai/recommender.py`
+
+```python
+"quality_grade": quality["grade"],
+```
+Only the letter grade (`A`/`B`/`C`/`D`) is written to the journal.  The raw `quality["quality_score"]` integer (0–100) is computed but discarded. This means post-trade analytics can only group by coarse bucket (A/B/C/D), not by precise score. A grade-B trade at 79 (one point from A) and one at 65 (barely passing) are indistinguishable in the journal.
+
+**Fix required (minor):**
+```python
+"quality_grade":  quality["grade"],
+"quality_score":  quality["quality_score"],   # add this line
+```
+Requires a schema migration if the journal DB already has rows.
 
 ***
 
-### `DEALER_OCLOCK_START` Config Comment is Now Stale
-**Status: ⚠️ Documentation Debt**
+### 🟡 NEW ISSUE-5 — `RISK_FREE_RATE` Defined Twice in `config.py`
 
-The comment at `DEALER_OCLOCK_START` in `config.py` still says :
-> *"the 30-minute overlap window (14:00–14:30) correctly receives -1 gate point (C10 fails: Dealer O'Clock active)"*
+**File:** `optdash/config.py`
 
-This is **no longer true**. C10 is now inverted to a **bonus** during DTE=1 Dealer O'Clock. The comment was accurate for the old implementation but now actively misleads anyone reading the config. It needs to be updated to reflect the new regime-switch behavior.
+```python
+# Under CoC section (line ~195):
+RISK_FREE_RATE: float = 0.065   # 91-day T-bill; update quarterly
+
+# Under IV section (line ~270):
+RISK_FREE_RATE: float = 0.0625  # RBI repo rate; current as of Mar 2026
+```
+Pydantic `BaseSettings` processes field declarations in order — the **second** definition (`0.0625`) silently overwrites the first (`0.065`).  The first definition and its comment are misleading dead code. Any maintainer reading the CoC section will believe the rate is `6.5%` when it is actually `6.25%`. Both sections' comments claim different sources (T-bill vs repo rate).
+
+**Fix required:** Remove the first duplicate declaration entirely, keeping only the authoritative one under the IV section with both source references reconciled.
 
 ***
 
-## Final Verification Summary
+## Consolidated Status
 
-| # | Issue | Status |
-|---|-------|--------|
-| 1 | Momentum Bucket Weighting | ✅ Fixed |
-| 2 | C10 Dealer O'Clock Contradiction | ✅ Fixed |
-| 3 | C2+C3 Double-Counting | ❌ Not addressed |
-| 4 | Volume Guard | ✅ Fixed (⚠️ unsafe default) |
-| 5 | `dte` in function signature | ✅ Fixed |
-| 6 | Opening Turbulence (9:15–9:30) | ✅ Fixed |
-| 7 | C7 Penalty Reclassification | ✅ Fixed |
-| 8 | Star Thresholds Recalibration | ✅ Fixed |
-| 9 | C5 IVP hardcoded 50.0 | ✅ Fixed |
-| 10 | Penalty-aware scoring engine | ✅ Fixed |
-| — | Stale `DEALER_OCLOCK_START` comment | ⚠️ Doc debt |
-
-**9 of 10 issues are fixed.** Three follow-up items remain: C2+C3 combined gate (Issue #3), the volume guard unsafe default (Issue #4 partial), and the stale config comment on `DEALER_OCLOCK_START`.
+| ID | File | Severity | Summary |
+|----|------|----------|---------|
+| ISSUE-1 | `recommender.py` / `quality.py` | 🔴 | Cold-start inflated confidence passes to Quality Score unguarded |
+| ISSUE-2 | `confidence.py` | 🔴 | `B_ACTIVE_MAX` hardcoded, not derived — silent drift risk on bucket cap changes |
+| ISSUE-3 | `confidence.py` | 🟠 | `session_adjusted` conflates midday penalty and closing cap — no audit trail |
+| ISSUE-4 | `recommender.py` | 🟡 | Raw `quality_score` integer not journalled, only letter grade |
+| ISSUE-5 | `config.py` | 🟡 | `RISK_FREE_RATE` declared twice with conflicting values and comments |
