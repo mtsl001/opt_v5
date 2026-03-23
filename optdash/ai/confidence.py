@@ -66,18 +66,28 @@ def compute_confidence(
     # The explicit None guard is an extra safety net for future callers.
     is_fallback  = learning_stats.get("is_fallback", False)
     total_trades = learning_stats.get("total_trades", 0)
+    cold_start   = False
     if is_fallback or total_trades < settings.CONFIDENCE_B4_MIN_TRADES:
         b4 = 0
+        cold_start = True
     else:
         raw_wr = learning_stats.get("win_rate")
         win_rate = (raw_wr / 100) if raw_wr is not None else 0.5
         b4 = min(settings.CONFIDENCE_B4_MAX, int(win_rate * settings.CONFIDENCE_B4_SCALE))
 
-    raw = b1 + b2 + b3 + b4
+    if cold_start:
+        raw = int((b1 + b2 + b3) * (100.0 / 90.0))
+    else:
+        raw = b1 + b2 + b3 + b4
 
     # Session adjustments
     if session == MarketSession.MIDDAY_CHOP:
-        raw -= settings.SESSION_MIDDAY_CONFIDENCE_PENALTY
+        pcr_mod = direction_result.get("pcr_modifier", 1.0)
+        smart_penalty = getattr(settings, "SESSION_MIDDAY_SMART_PENALTY", False)
+        if smart_penalty and b1 >= 35 and pcr_mod > 1.0:
+            raw -= 5
+        else:
+            raw -= settings.SESSION_MIDDAY_CONFIDENCE_PENALTY
     if session == MarketSession.CLOSING_CRUSH:
         raw = min(raw, settings.SESSION_CLOSING_CONFIDENCE_CAP)
 
@@ -92,4 +102,5 @@ def compute_confidence(
             "historical":       b4,
         },
         "session_adjusted": raw != (b1 + b2 + b3 + b4),
+        "cold_start":       cold_start,
     }
