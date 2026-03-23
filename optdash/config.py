@@ -501,7 +501,7 @@ class Settings(BaseSettings):
         "LOT_SIZES", "STRIKE_INTERVALS", "EXPIRY_WEEKDAY",
         "VEX_THRESHOLDS", "CEX_CHARM_THRESHOLD", "CEX_VANNA_THRESHOLD",
         "FUT_OBI_BEAR_THRESHOLD", "IV_CRUSH_HIGH_VEGA", "DIVIDEND_YIELD",
-        "LIQUIDITY_CAP_CR",
+        "LIQUIDITY_CAP_CR", "AI_SL_IV_BASE",
     )
     @classmethod
     def _check_underlying_coverage(cls, v: dict, info) -> dict:
@@ -569,7 +569,10 @@ class Settings(BaseSettings):
 
     AI_SL_PCT:           float = 0.35
     AI_TARGET_MULT:      float = 1.50
-    AI_SL_IV_BASE:       float = 25.0
+    AI_SL_IV_BASE:       dict[str, float] = {
+        "NIFTY": 18.0, "BANKNIFTY": 32.0, "FINNIFTY": 22.0,
+        "MIDCPNIFTY": 20.0, "NIFTYNXT50": 20.0,
+    }
     AI_SL_IV_STEP:       float = 0.004
     AI_MIN_RR_RATIO:     float = 2.0
     AI_EXPIRY_MAX_SNAPS: int   = 3
@@ -614,7 +617,7 @@ class Settings(BaseSettings):
     CONFIDENCE_B4_SCALE: int = 12   # denominator ceiling; keep at 1.2× B4_MAX
 
     SESSION_MIDDAY_CONFIDENCE_PENALTY: int = 10
-    SESSION_CLOSING_CONFIDENCE_CAP:    int = 60
+    SESSION_CLOSING_CONFIDENCE_CAP:    int = 65
 
     # -- Pipeline Greeks Safety
     # P0-3: cap for vanna values before VEX multiplication in processor.py.

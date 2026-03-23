@@ -179,7 +179,9 @@ def generate_recommendation(
     candidates = [s for s in strike_list if s["option_type"] == direction]
     if not candidates:
         return None
-    strike = candidates[0]
+        
+    tier1_candidates = [s for s in candidates if s.get("expiry_tier") == "TIER1"]
+    strike = tier1_candidates[0] if tier1_candidates else candidates[0]
 
     # Guard: zero or negative LTP means illiquid / expired strike -- skip
     entry_premium = strike.get("ltp") or 0
@@ -232,15 +234,16 @@ def generate_recommendation(
         return None
 
     # -- SL / Target
-    iv_entry   = strike.get("iv") or 25.0
-    iv_sl_adj  = max(0.20, min(0.45, settings.AI_SL_PCT + (iv_entry - settings.AI_SL_IV_BASE) * settings.AI_SL_IV_STEP))
+    iv_base   = settings.AI_SL_IV_BASE.get(underlying, 25.0)
+    iv_entry  = strike.get("iv") or iv_base
+    iv_sl_adj = max(0.20, min(0.45, settings.AI_SL_PCT + (iv_entry - iv_base) * settings.AI_SL_IV_STEP))
     iv_tgt_adj = max(settings.AI_TARGET_MULT, 1.0 + iv_sl_adj * settings.AI_MIN_RR_RATIO)
     sl     = round(entry_premium * (1 - iv_sl_adj), 2)
     target = round(entry_premium * iv_tgt_adj, 2)
 
     risk   = entry_premium - sl
     reward = target - entry_premium
-    if risk > 0 and (reward / risk) < settings.AI_MIN_RR_RATIO:
+    if risk > 0 and (reward / risk) < (settings.AI_MIN_RR_RATIO - 0.01):
         logger.info(
             "R:R {:.2f} below minimum {:.2f} for {} {} @ {} -- skipping",
             reward / risk, settings.AI_MIN_RR_RATIO,
@@ -260,7 +263,6 @@ def generate_recommendation(
         direction=direction,
         conviction=dir_res.get("conviction", "MODERATE"),
         pcr_modifier=dir_res.get("pcr_modifier", 1.0),
-        veto=dir_res.get("veto"),
         gate_score=gate["score"],
         gate_verdict=gate["verdict"],
         direction_signals=dir_res["signals"],

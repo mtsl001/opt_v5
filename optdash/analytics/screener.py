@@ -161,5 +161,5 @@ def get_strikes(
 
         return rows_out
     except Exception as e:
-        logger.warning("get_strikes error: {}", e)
-        return []
+        logger.warning("get_strikes internal error: {}", e, exc_info=True)
+        raise

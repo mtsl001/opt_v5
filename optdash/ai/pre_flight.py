@@ -12,6 +12,7 @@ def run_pre_flight(
 ) -> tuple[bool, list[str]]:
     """Returns (passed: bool, failures: list[str])"""
     failures = []
+    dte = strike.get("dte")
 
     # Rule 1: Gate score floor
     if gate_score < settings.PREFLIGHT_MIN_GATE_SCORE:
@@ -28,11 +29,10 @@ def run_pre_flight(
     # Rule 3: Theta/premium ratio -- DTE-scaled
     theta = abs(strike.get("theta") or 0)
     ltp   = strike.get("ltp") or 0
-    dte_val = strike.get("dte")
 
-    if dte_val is not None and dte_val <= 0:
+    if dte is not None and dte <= 0:
         theta_cap = None
-    elif dte_val is not None and dte_val <= 2:
+    elif dte is not None and dte <= 2:
         theta_cap = settings.PREFLIGHT_THETA_RATIO_DTE12
     else:
         theta_cap = settings.PREFLIGHT_MAX_THETA_RATIO
@@ -40,7 +40,7 @@ def run_pre_flight(
     if theta_cap is not None and ltp > 0 and (theta / ltp) > theta_cap:
         failures.append(
             f"Theta/premium {theta/ltp:.1%} exceeds {theta_cap:.0%} "
-            f"(DTE={dte_val}) -- excessive daily decay vs premium"
+            f"(DTE={dte}) -- excessive daily decay vs premium"
         )
 
     # Rule 4: Max Pain proximity -- P4-F7: explicit None check so 0.0 (spot
@@ -72,7 +72,6 @@ def run_pre_flight(
     # check left DTE=0 completely unguarded -- the highest-risk expiry window.
     # Guarded with explicit None check: if screener omits DTE, we skip the rule
     # rather than blocking every trade on missing data.
-    dte = strike.get("dte")
     if dte is not None and dte <= 1:
         if gate_score < settings.PREFLIGHT_DTE1_MIN_GATE:
             failures.append(
@@ -95,8 +94,7 @@ def run_pre_flight(
     # substituted 99, making the rule permanently skip on expiry morning even
     # though DTE=0 is exactly the condition it was designed to catch.
     # Absent DTE (None) still defaults to 99 -- rule skips on missing data as intended.
-    _r7_dte = strike.get("dte")
-    if dealer_oclock and (_r7_dte if _r7_dte is not None else 99) <= 1:
+    if dealer_oclock and (dte if dte is not None else 99) <= 1:
         failures.append(
             "DEALER O'CLOCK on expiry day -- charm distortion blocks entry"
         )

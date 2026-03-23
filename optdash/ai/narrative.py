@@ -7,7 +7,6 @@ def build_narrative(
     direction:         str,
     conviction:        str,
     pcr_modifier:      float,
-    veto:              str | None,
     gate_score:        int,
     gate_verdict:      str,
     direction_signals: list[dict],
@@ -18,9 +17,6 @@ def build_narrative(
     dealer_oclock:     bool,
 ) -> str:
     parts = []
-
-    if veto:
-        parts.append(f"Veto active ({veto}) — proceeding with caution.")
 
     if conviction == "STRONG":
         parts.append("STRONG CONVICTION setup — all institutional signals aligned.")
