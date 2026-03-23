@@ -11,7 +11,7 @@ S_score normalisation:
   Screener formula: (weighted sum of 7 factors) × 10
   Max possible = (W_DELTA×0.50 + W_EFF_RATIO + W_LIQUIDITY + W_IV
                   + W_GAMMA + W_VEGA + W_MOMENTUM×3.0) × 10 = 180
-  Practical 99th-pct for screened options ≈ 120 → used as normaliser.
+  Practical 99th-pct for screened options ≈ 128 → used as normaliser.
 """
 from optdash.config import settings
 
