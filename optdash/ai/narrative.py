@@ -5,6 +5,9 @@ from optdash.models import MarketSession
 
 def build_narrative(
     direction:         str,
+    conviction:        str,
+    pcr_modifier:      float,
+    veto:              str | None,
     gate_score:        int,
     gate_verdict:      str,
     direction_signals: list[dict],
@@ -15,6 +18,17 @@ def build_narrative(
     dealer_oclock:     bool,
 ) -> str:
     parts = []
+
+    if veto:
+        parts.append(f"Veto active ({veto}) — proceeding with caution.")
+
+    if conviction == "STRONG":
+        parts.append("STRONG CONVICTION setup — all institutional signals aligned.")
+    else:
+        parts.append(f"{conviction} setup — proceed with smaller size.")
+
+    if abs(pcr_modifier - 1.0) > 0.05:
+        parts.append(f"PCR multiplier at {pcr_modifier:.2f}x adjusting context.")
 
     # Guard: skip top-signal sentence if value is None (signal unavailable)
     top_signal = max(direction_signals, key=lambda s: s["weight"], default=None)

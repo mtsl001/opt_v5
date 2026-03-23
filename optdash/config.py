@@ -532,7 +532,6 @@ class Settings(BaseSettings):
     W_EFF_RATIO:  float = 4.0
     W_LIQUIDITY:  float = 3.0
     W_IV:         float = 2.0
-    W_THETA:      float = 2.0
     W_GAMMA:      float = 1.0
     W_VEGA:       float = 1.0
     W_MOMENTUM:   float = 1.0
@@ -560,14 +559,19 @@ class Settings(BaseSettings):
     PREFLIGHT_MIN_GATE_SCORE:      int   = 5
     PREFLIGHT_MIN_CONFIDENCE:      int   = 50
     PREFLIGHT_MAX_THETA_RATIO:     float = 0.03
+    PREFLIGHT_THETA_RATIO_DTE12:   float = 0.08
     PREFLIGHT_MAX_PAIN_PROXIMITY:  float = 0.005
     PREFLIGHT_MIN_SSCORE:          float = 60.0
+    PREFLIGHT_MIN_QUALITY_SCORE:   int   = 50
     PREFLIGHT_DTE1_MIN_GATE:       int   = 7
     PREFLIGHT_DTE1_MIN_CONFIDENCE: int   = 65
     PREFLIGHT_DTE1_MIN_MARGIN:     int   = 5
 
     AI_SL_PCT:           float = 0.35
     AI_TARGET_MULT:      float = 1.50
+    AI_SL_IV_BASE:       float = 25.0
+    AI_SL_IV_STEP:       float = 0.004
+    AI_MIN_RR_RATIO:     float = 2.0
     AI_EXPIRY_MAX_SNAPS: int   = 3
 
     @field_validator("AI_SL_PCT")

@@ -166,7 +166,8 @@ def generate_recommendation(
     # -- Best strike selection
     try:
         strike_list = get_strikes(
-            conn, trade_date, snap_time, underlying, top_n=settings.SCREENER_TOP_N
+            conn, trade_date, snap_time, underlying, top_n=settings.SCREENER_TOP_N,
+            direction=direction
         )
     except Exception:
         logger.warning(
@@ -222,7 +223,6 @@ def generate_recommendation(
         gex_data={**gex_data, 
                   "max_pain_distance_pct": max_pain.get("distance_pct", 99),
                   "direction_margin": dir_res.get("margin", 0)},
-        session=session,
         dealer_oclock=dealer_oc,
     )
     if not passed:
@@ -232,15 +232,35 @@ def generate_recommendation(
         return None
 
     # -- SL / Target
-    sl     = round(entry_premium * (1 - settings.AI_SL_PCT), 2)
-    target = round(entry_premium * settings.AI_TARGET_MULT, 2)
+    iv_entry   = strike.get("iv") or 25.0
+    iv_sl_adj  = max(0.20, min(0.45, settings.AI_SL_PCT + (iv_entry - settings.AI_SL_IV_BASE) * settings.AI_SL_IV_STEP))
+    iv_tgt_adj = max(settings.AI_TARGET_MULT, 1.0 + iv_sl_adj * settings.AI_MIN_RR_RATIO)
+    sl     = round(entry_premium * (1 - iv_sl_adj), 2)
+    target = round(entry_premium * iv_tgt_adj, 2)
+
+    risk   = entry_premium - sl
+    reward = target - entry_premium
+    if risk > 0 and (reward / risk) < settings.AI_MIN_RR_RATIO:
+        logger.info(
+            "R:R {:.2f} below minimum {:.2f} for {} {} @ {} -- skipping",
+            reward / risk, settings.AI_MIN_RR_RATIO,
+            underlying, direction, strike["strike_price"]
+        )
+        return None
 
     # -- Quality grade
     quality = compute_quality_score(strike, gate["score"], confidence)
+    if quality.get("quality_score", 0) < settings.PREFLIGHT_MIN_QUALITY_SCORE:
+        logger.info("Quality grade {} below minimum for {} {} -- skipping",
+                    quality.get("grade"), underlying, snap_time)
+        return None
 
     # -- Narrative
     narrative = build_narrative(
         direction=direction,
+        conviction=dir_res.get("conviction", "MODERATE"),
+        pcr_modifier=dir_res.get("pcr_modifier", 1.0),
+        veto=dir_res.get("veto"),
         gate_score=gate["score"],
         gate_verdict=gate["verdict"],
         direction_signals=dir_res["signals"],

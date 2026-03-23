@@ -23,9 +23,9 @@ _SSCORE_MAX = (
     + settings.W_EFF_RATIO
     + settings.W_LIQUIDITY
     + settings.W_IV
-    + settings.W_THETA
     + settings.W_GAMMA
     + settings.W_VEGA
+    + settings.W_MOMENTUM * 3.0
 ) * 10
 _SSCORE_NORM = _SSCORE_MAX * 0.80  # practical 99th-pct range
 

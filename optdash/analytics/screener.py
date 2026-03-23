@@ -50,6 +50,15 @@ def get_strikes(
         ivp = iv_data.get("ivp")
         iv_penalty_gate = 1.0 if (ivp is not None and ivp < 50) else 0.0
 
+        min_dte_row = conn.execute(
+            "SELECT MIN(dte) FROM options_data WHERE trade_date=? AND snap_time=? AND underlying=? AND expiry_tier IN ('TIER1', 'TIER2')",
+            [trade_date, snap_time, underlying]
+        ).fetchone()
+        min_dte = min_dte_row[0] if min_dte_row and min_dte_row[0] is not None else 99
+        eff_cap = settings.SCREENER_MIN_EFF_RATIO
+        if min_dte <= 2:
+            eff_cap = max(eff_cap, 0.20)  # Relaxed eff cap for DTE<=2
+
         result = conn.execute(f"""
             WITH spot_cte AS (
                 SELECT AVG(spot) AS spot
@@ -84,13 +93,14 @@ def get_strikes(
                       + ? * LEAST(1.0, ABS(o.gamma) * 100)
                         -- 5. Vega: IV sensitivity (cap at 50)
                       + ? * LEAST(1.0, ABS(o.vega) / 50.0)
-                        -- 6. Eff-ratio: theta/delta at 10% cap
-                      + ? * (1.0 - LEAST(1.0, ABS(o.theta) / NULLIF(ABS(o.delta), 0) / 0.10))
+                        -- 6. Eff-ratio: theta/delta at parameterised cap
+                      + ? * (1.0 - LEAST(1.0, ABS(o.theta) / NULLIF(ABS(o.delta), 0) / ?))
                         -- 7. Momentum signal: volume / avg_volume_20d (cap at 3x)
                       + ? * LEAST(3.0, o.volume / NULLIF(TRY_CAST(o.avg_volume_20d AS DOUBLE), 0))
                     ) * 10                                                 AS s_score
                 FROM options_data o, spot_cte s
                 WHERE o.trade_date=? AND o.snap_time=? AND o.underlying=?
+                  AND o.expiry_tier IN ('TIER1', 'TIER2')
                   AND ABS((o.strike_price - s.spot) / s.spot * 100) <= ?
                   AND ABS(o.delta) BETWEEN ? AND ?
                   AND o.oi * o.ltp / 1e7 >= ?
@@ -114,7 +124,7 @@ def get_strikes(
             settings.W_IV, iv_penalty_gate,
             settings.W_GAMMA,
             settings.W_VEGA,
-            settings.W_EFF_RATIO,
+            settings.W_EFF_RATIO, eff_cap,
             settings.W_MOMENTUM,
             trade_date, snap_time, underlying,
             settings.SCREENER_MAX_MONEYNESS_PCT,
