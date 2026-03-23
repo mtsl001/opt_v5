@@ -1,23 +1,24 @@
 """Strike screener — S_score ranking with star ratings.
 
-S_score (0–~150) is a weighted composite of 7 independent factors:
-  1. delta        — directional sensitivity (proximity to ATM)
-  2. theta ratio  — time-decay efficiency (W_THETA cap: 5% daily decay)
-  3. liquidity    — OI × LTP in Cr (capped at 5 Cr)
-  4. IV           — lower IV preferred for entry (cap at 100)
-  5. gamma        — convexity / acceleration (capped at 0.01)
-  6. vega         — IV sensitivity (capped at 50)
-  7. eff_ratio    — theta/LTP efficiency at 10% cap (different from W_THETA's 5%)
+S_score (0–~180) is a weighted composite of 7 independent factors:
+  1. delta        — directional sensitivity (normalized 0-1)
+  2. liquidity    — OI × LTP (capped per underlying) with bid-ask spread penalty
+  3. IV           — lower IV preferred for entry (gated by IVP < 50)
+  4. gamma        — convexity / acceleration (capped at 0.01)
+  5. vega         — IV sensitivity (capped at 50)
+  6. eff_ratio    — theta/delta efficiency at 10% cap
+  7. momentum     — volume / avg_volume_20d (capped at 3.0x)
 
-Theoretical max = (W_DELTA×0.50 + W_EFF_RATIO + W_LIQUIDITY + W_IV
-                   + W_THETA + W_GAMMA + W_VEGA) × 10
-               = (2.0 + 4.0 + 3.0 + 2.0 + 2.0 + 1.0 + 1.0) × 10 = 150
-delta is capped at 0.50 by the SCREENER_MAX_DELTA filter.
-Typical well-screened option scores 70–120.
+Theoretical max = (W_DELTA×1.0 + W_LIQUIDITY×1.0 + W_IV×1.0
+                   + W_GAMMA×1.0 + W_VEGA×1.0 + W_EFF_RATIO×1.0 + W_MOMENTUM×3.0) × 10
+               = (4.0 + 3.0 + 2.0 + 1.0 + 1.0 + 4.0 + 3.0) × 10 = 180
+delta is capped at 0.65 by the SCREENER_MAX_DELTA filter.
+Typical well-screened option scores 70–130.
 """
 import duckdb
 from loguru import logger
 from optdash.config import settings
+from optdash.analytics.iv import get_ivr_ivp
 
 
 def get_strikes(
@@ -44,6 +45,11 @@ def get_strikes(
         # relying on (? IS NULL OR ...) to sidestep DuckDB NULL param issues.
         direction_clause = "AND o.option_type = ?" if direction else ""
 
+        # Fetch IVP for Issue #4 to gate the IV penalty
+        iv_data = get_ivr_ivp(conn, trade_date, snap_time, underlying)
+        ivp = iv_data.get("ivp")
+        iv_penalty_gate = 1.0 if (ivp is not None and ivp < 50) else 0.0
+
         result = conn.execute(f"""
             WITH spot_cte AS (
                 SELECT AVG(spot) AS spot
@@ -65,22 +71,23 @@ def get_strikes(
                     o.vega,
                     (o.strike_price - s.spot) / s.spot * 100              AS moneyness_pct,
                     o.oi * o.ltp / 1e7                                     AS liquidity_cr,
-                    ABS(o.theta) / NULLIF(o.ltp, 0)                       AS eff_ratio,
+                    ABS(o.theta) / NULLIF(ABS(o.delta), 0)                 AS eff_ratio,
                     (
-                        -- 1. Delta: directional sensitivity
-                        ? * ABS(o.delta)
-                        -- 2. Theta efficiency (cap at 5% daily decay ratio)
-                      + ? * (1.0 - LEAST(1.0, ABS(o.theta) / NULLIF(o.ltp, 0) / 0.05))
-                        -- 3. Liquidity (cap at 5 Cr OI×LTP)
-                      + ? * LEAST(1.0, o.oi * o.ltp / 1e7 / 5.0)
-                        -- 4. IV: lower is better (cap at 100)
-                      + ? * (1.0 - LEAST(1.0, o.iv / 100.0))
-                        -- 5. Gamma: convexity (cap at 0.01)
+                        -- 1. Delta: directional sensitivity (normalized)
+                        ? * (ABS(o.delta) - ?) / (? - ?)
+                        -- 2. Liquidity (capped per underlying) with bid-ask spread penalty
+                      + ? * LEAST(1.0, o.oi * o.ltp / 1e7 / ?)
+                          * (1.0 - LEAST(1.0, COALESCE(o.depth_ask1_price - o.depth_bid1_price, 0) / NULLIF(o.ltp * 0.05, 0)))
+                        -- 3. IV: lower is better (gated by IVP < 50)
+                      + ? * ? * (1.0 - LEAST(1.0, o.iv / 100.0))
+                        -- 4. Gamma: convexity (cap at 0.01)
                       + ? * LEAST(1.0, ABS(o.gamma) * 100)
-                        -- 6. Vega: IV sensitivity (cap at 50)
+                        -- 5. Vega: IV sensitivity (cap at 50)
                       + ? * LEAST(1.0, ABS(o.vega) / 50.0)
-                        -- 7. Eff-ratio: theta/LTP at 10% cap (distinct from term 2)
-                      + ? * (1.0 - LEAST(1.0, ABS(o.theta) / NULLIF(o.ltp, 0) / 0.10))
+                        -- 6. Eff-ratio: theta/delta at 10% cap
+                      + ? * (1.0 - LEAST(1.0, ABS(o.theta) / NULLIF(ABS(o.delta), 0) / 0.10))
+                        -- 7. Momentum signal: volume / avg_volume_20d (cap at 3x)
+                      + ? * LEAST(3.0, o.volume / NULLIF(TRY_CAST(o.avg_volume_20d AS DOUBLE), 0))
                     ) * 10                                                 AS s_score
                 FROM options_data o, spot_cte s
                 WHERE o.trade_date=? AND o.snap_time=? AND o.underlying=?
@@ -102,8 +109,13 @@ def get_strikes(
             LIMIT ?
         """, [
             trade_date, snap_time, underlying,
-            settings.W_DELTA, settings.W_THETA, settings.W_LIQUIDITY,
-            settings.W_IV,    settings.W_GAMMA,  settings.W_VEGA, settings.W_EFF_RATIO,
+            settings.W_DELTA, settings.SCREENER_MIN_DELTA, settings.SCREENER_MAX_DELTA, settings.SCREENER_MIN_DELTA,
+            settings.W_LIQUIDITY, settings.LIQUIDITY_CAP_CR.get(underlying, 10.0),
+            settings.W_IV, iv_penalty_gate,
+            settings.W_GAMMA,
+            settings.W_VEGA,
+            settings.W_EFF_RATIO,
+            settings.W_MOMENTUM,
             trade_date, snap_time, underlying,
             settings.SCREENER_MAX_MONEYNESS_PCT,
             settings.SCREENER_MIN_DELTA, settings.SCREENER_MAX_DELTA,

@@ -498,6 +498,7 @@ class Settings(BaseSettings):
         "LOT_SIZES", "STRIKE_INTERVALS", "EXPIRY_WEEKDAY",
         "VEX_THRESHOLDS", "CEX_CHARM_THRESHOLD", "CEX_VANNA_THRESHOLD",
         "FUT_OBI_BEAR_THRESHOLD", "IV_CRUSH_HIGH_VEGA", "DIVIDEND_YIELD",
+        "LIQUIDITY_CAP_CR",
     )
     @classmethod
     def _check_underlying_coverage(cls, v: dict, info) -> dict:
@@ -513,9 +514,15 @@ class Settings(BaseSettings):
     SCREENER_TOP_N:             int   = 20
     SCREENER_MAX_MONEYNESS_PCT: float = 5.0
     SCREENER_MIN_LIQUIDITY_CR:  float = 0.5
-    SCREENER_MIN_DELTA:         float = 0.10
-    SCREENER_MAX_DELTA:         float = 0.50
+    SCREENER_MIN_DELTA:         float = 0.20
+    SCREENER_MAX_DELTA:         float = 0.65
     SCREENER_MIN_EFF_RATIO:     float = 0.10
+
+    # Per-underlying liquidity caps (Cr)
+    LIQUIDITY_CAP_CR: dict[str, float] = {
+        "NIFTY": 10.0, "BANKNIFTY": 25.0, "FINNIFTY": 10.0,
+        "MIDCPNIFTY": 5.0, "NIFTYNXT50": 5.0,
+    }
 
     # -- S_score Weights
     W_DELTA:      float = 4.0
@@ -525,6 +532,7 @@ class Settings(BaseSettings):
     W_THETA:      float = 2.0
     W_GAMMA:      float = 1.0
     W_VEGA:       float = 1.0
+    W_MOMENTUM:   float = 1.0
     # Star thresholds calibrated against the 0-~150 S_score scale.
     STAR_4_THRESHOLD: float = 100.0  # >=67% of max - excellent
     STAR_3_THRESHOLD: float =  80.0  # >=53% of max - good
