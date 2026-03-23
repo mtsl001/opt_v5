@@ -31,11 +31,11 @@ def compute_confidence(
     # New formula: lowering the margin coefficient to 7 creates headroom so
     # unique_source_count*3 contributes at margin<=5 (e.g. margin=3, count=5: 21+15=36 vs 24).
     # Max score still hits cap at margin=6+ so genuinely dominant setups are unaffected.
-    b1 = min(40, margin * 7 + unique_source_count * 3)
+    b1 = min(settings.CONFIDENCE_B1_MAX, margin * 7 + unique_source_count * 3)
 
     # Bucket 2: gate adequacy — P4-F5: corrected multiplier from 30 → 25.
     gate_max = settings.GATE_MAX_SCORE or 10
-    b2 = min(25, int((gate_score / gate_max) * 25))
+    b2 = min(settings.CONFIDENCE_B2_MAX, int((gate_score / gate_max) * settings.CONFIDENCE_B2_MAX))
 
     # Bucket 3: structural quality
     ivp_val = iv_data.get("ivp")
@@ -57,7 +57,7 @@ def compute_confidence(
     if vrp_regime == "UNDERPRICED":
         b3 += 3
 
-    b3 = min(25, b3)
+    b3 = min(settings.CONFIDENCE_B3_MAX, b3)
 
     # Bucket 4: historical performance — P4-F14b: cold-start guard.
     # Fix LEARN-2 compatibility: win_rate may now be None when total_trades=0.
@@ -76,7 +76,7 @@ def compute_confidence(
         b4 = min(settings.CONFIDENCE_B4_MAX, int(win_rate * settings.CONFIDENCE_B4_SCALE))
 
     if cold_start:
-        B_ACTIVE_MAX = 40 + 25 + 25  # B1 + B2 + B3 max points
+        B_ACTIVE_MAX = settings.CONFIDENCE_B1_MAX + settings.CONFIDENCE_B2_MAX + settings.CONFIDENCE_B3_MAX
         raw = int((b1 + b2 + b3) * (100.0 / B_ACTIVE_MAX))
     else:
         raw = b1 + b2 + b3 + b4
@@ -84,15 +84,20 @@ def compute_confidence(
     raw_pre_session = raw
 
     # Session adjustments
+    session_adjusted_reason = None
     if session == MarketSession.MIDDAY_CHOP:
         # Defaults to 1.0 (no confirm) if missing on VEX/exception paths
         pcr_mod = direction_result.get("pcr_modifier", 1.0)
         smart_penalty = getattr(settings, "SESSION_MIDDAY_SMART_PENALTY", False)
         if smart_penalty and b1 >= 35 and pcr_mod > 1.0:
             raw -= 5
+            session_adjusted_reason = "MIDDAY_PENALTY_SMART"
         else:
             raw -= settings.SESSION_MIDDAY_CONFIDENCE_PENALTY
+            session_adjusted_reason = "MIDDAY_PENALTY"
     if session == MarketSession.CLOSING_CRUSH:
+        if raw > settings.SESSION_CLOSING_CONFIDENCE_CAP:
+            session_adjusted_reason = "CLOSING_CAP"
         raw = min(raw, settings.SESSION_CLOSING_CONFIDENCE_CAP)
 
     confidence = max(0, min(100, raw))
@@ -106,5 +111,6 @@ def compute_confidence(
             "historical":       b4,
         },
         "session_adjusted": raw != raw_pre_session,
+        "session_adjusted_reason": session_adjusted_reason,
         "cold_start":       cold_start,
     }

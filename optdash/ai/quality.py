@@ -30,7 +30,7 @@ _SSCORE_MAX = (
 _SSCORE_NORM = _SSCORE_MAX * 0.80  # practical 99th-pct range (≈ 128)
 
 
-def compute_quality_score(strike: dict, gate_score: int, confidence: int) -> dict:
+def compute_quality_score(strike: dict, gate_score: int, confidence: int, cold_start: bool = False, raw_confidence: int = 0) -> dict:
     """
     Note: Circular dependency risk. gate_score aligns dynamically within C2
     while confidence (C3) inherently uses gate_score already through Confidence B2.
@@ -45,7 +45,8 @@ def compute_quality_score(strike: dict, gate_score: int, confidence: int) -> dic
     c2 = min(35, (gate_score / gate_go) * 35)
 
     # C3: Confidence adequacy
-    c3 = min(30, (confidence / 100) * 30)
+    c3_input = raw_confidence if cold_start else confidence
+    c3 = min(30, (c3_input / 100) * 30)
 
     quality = int(c1 + c2 + c3)
     grade = (

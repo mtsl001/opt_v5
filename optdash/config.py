@@ -322,7 +322,6 @@ class Settings(BaseSettings):
     COC_DISCOUNT_THRESHOLD_PCT:  float = -2.0
 
     # -- CoC fair-value adjustment (CoC-2 — used from Commit 3 onwards)
-    RISK_FREE_RATE: float = 0.065   # 91-day T-bill; update quarterly
     DIVIDEND_YIELD: dict[str, float] = {
         "NIFTY": 0.012, "BANKNIFTY": 0.008, "FINNIFTY": 0.010,
         "MIDCPNIFTY": 0.006, "NIFTYNXT50": 0.006,
@@ -465,8 +464,8 @@ class Settings(BaseSettings):
     VIX_HIGH_IVP_THRESHOLD:   float = 35.0
     VIX_NORMAL_IVP_THRESHOLD: float = 50.0
 
-    # Risk-free rate for exact BSM Greek computation.
-    # Use RBI repo rate (annualised decimal). Update when RBI changes policy rate.
+    # Risk-free rate for exact BSM Greek computation and CoC fair-value adjustment.
+    # Source: 91-day T-bill / RBI repo rate (annualised decimal). Update quarterly/when RBI changes policy rate.
     # Current RBI repo rate: 6.25% as of Mar 2026.
     # Override in .env: RISK_FREE_RATE=0.0650
     RISK_FREE_RATE: float = 0.0625
@@ -608,8 +607,11 @@ class Settings(BaseSettings):
     # Below this threshold, B4 = 0 (cold-start protection).
     CONFIDENCE_B4_MIN_TRADES: int = 15
 
-    # Bucket 4 max raw points (before min() cap).
-    # Keep in sync with Bucket 4 cap in compute_confidence().
+    # Bucket max raw points (before min() cap).
+    # Keep in sync with Bucket caps in compute_confidence().
+    CONFIDENCE_B1_MAX:   int = 40
+    CONFIDENCE_B2_MAX:   int = 25
+    CONFIDENCE_B3_MAX:   int = 25
     # Formula: b4 = min(CONFIDENCE_B4_MAX, int(win_rate * CONFIDENCE_B4_SCALE))
     CONFIDENCE_B4_MAX:   int = 10
     CONFIDENCE_B4_SCALE: int = 10

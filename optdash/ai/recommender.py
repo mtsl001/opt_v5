@@ -252,7 +252,13 @@ def generate_recommendation(
         return None
 
     # -- Quality grade
-    quality = compute_quality_score(strike, gate["score"], confidence)
+    cold_start = conf_result.get("cold_start", False)
+    raw_confidence = sum([
+        conf_result["buckets"].get("signal_alignment", 0),
+        conf_result["buckets"].get("gate_score", 0),
+        conf_result["buckets"].get("structural", 0)
+    ])
+    quality = compute_quality_score(strike, gate["score"], confidence, cold_start=cold_start, raw_confidence=raw_confidence)
     if quality.get("quality_score", 0) < settings.PREFLIGHT_MIN_QUALITY_SCORE:
         logger.info("Quality grade {} below minimum for {} {} -- skipping",
                     quality.get("grade"), underlying, snap_time)
@@ -299,6 +305,7 @@ def generate_recommendation(
             "gate_verdict":      gate["verdict"],
             "s_score":           strike["s_score"],
             "quality_grade":     quality["grade"],
+            "quality_score":     quality["quality_score"],
             "direction_signals": json.dumps(dir_res["signals"]),
             "narrative":         narrative,
             "status":            TradeStatus.GENERATED.value,
