@@ -533,10 +533,10 @@ class Settings(BaseSettings):
     W_GAMMA:      float = 1.0
     W_VEGA:       float = 1.0
     W_MOMENTUM:   float = 1.0
-    # Star thresholds calibrated against the 0-~150 S_score scale.
-    STAR_4_THRESHOLD: float = 100.0  # >=67% of max - excellent
-    STAR_3_THRESHOLD: float =  80.0  # >=53% of max - good
-    STAR_2_THRESHOLD: float =  60.0  # >=40% of max - acceptable
+    # Star thresholds calibrated against the 0-~180 S_score scale.
+    STAR_4_THRESHOLD: float = 120.0  # >=67% of max - excellent
+    STAR_3_THRESHOLD: float =  95.0  # >=53% of max - good
+    STAR_2_THRESHOLD: float =  70.0  # >=40% of max - acceptable
 
     # -- Environment Gate
     GATE_GO_THRESHOLD:   int = 7
