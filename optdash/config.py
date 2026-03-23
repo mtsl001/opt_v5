@@ -358,8 +358,8 @@ class Settings(BaseSettings):
     # (14:00 vs 14:30).  On DTE=1, dealer delta-hedging (charm flow) intensifies
     # from ~14:00, before the session boundary at 14:30.  Gate condition C10
     # uses DEALER_OCLOCK_START independently from C8 (SESSION_CLOSING_START) so
-    # the 30-minute overlap window (14:00–14:30) correctly receives -1 gate point
-    # (C10 fails: Dealer O'Clock active) while C8 stays +1 (still AFTERNOON
+    # the 30-minute overlap window (14:00–14:30) correctly flips C10 into a bonus
+    # (+1 pt for charm flow alignment) while C8 stays +1 (still AFTERNOON
     # session, not MIDDAY_CHOP).
     #
     # !! DO NOT align these two values without re-calibrating the C8+C10

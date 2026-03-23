@@ -82,30 +82,23 @@ def get_environment_score(
             "points": 1, "note": f"{gex_pct_near:.0f}% of peak (near-expiry GEX)"
         }
 
-        # C2: V_CoC velocity (1 pt)
-        # Split into explicit bull/bear checks rather than abs() == abs()
-        # so future asymmetric threshold tuning (VCOC_BEAR_THRESHOLD != -VCOC_BULL)
-        # is handled correctly without changing this logic.
+        # C2 + C3: V_CoC velocity & Futures OBI combined momentum gate (2 pts)
+        # Fix: Issue #3 - These measure the same institutional flow event,
+        # so they must fire together to avoid double counting.
         _vcoc_bull = abs(settings.VCOC_BULL_THRESHOLD)
         _vcoc_bear = -_vcoc_bull  # symmetric today; override via VCOC_BEAR_THRESHOLD when added
         c2_met = vcoc > _vcoc_bull or vcoc < _vcoc_bear
-        conditions["vcoc_signal"] = {
-            "met": c2_met, "value": round(vcoc, 2),
-            "points": 1, "note": f"V_CoC 15m = {vcoc:+.2f}"
-        }
-
-        # C3: Futures OBI -- strong directional conviction (1 pt)
-        # OptDash is an options BUYING dashboard (CE and PE buyers).
-        # C3 fires on EITHER strong bearish OR strong bullish institutional
-        # futures flow -- symmetric thresholds ensure CE trades can also earn
-        # this point when buyers dominate the futures market.
+        
         fut_obi_bear = settings.FUT_OBI_BEAR_THRESHOLD.get(underlying, -0.20)
         fut_obi_bull = abs(fut_obi_bear)
         c3_met = fut_bs < fut_obi_bear or fut_bs > fut_obi_bull
-        conditions["fut_bs_ratio"] = {
-            "met": c3_met, "value": round(fut_bs, 4),
-            "points": 1,
-            "note": f"Fut OBI = {fut_bs:.3f} (bear<{fut_obi_bear:.2f} | bull>{fut_obi_bull:.2f})"
+
+        c2c3_met = c2_met and c3_met
+        conditions["vcoc_fut_combined"] = {
+            "met": c2c3_met, 
+            "value": f"VCoC:{round(vcoc,2)}|FUT:{round(fut_bs,3)}",
+            "points": 2, 
+            "note": "Combined V_CoC & Fut OBI momentum (2 pts)"
         }
 
         pcr_tier  = pcr_data.get("tier_used", "TIER1")
@@ -227,8 +220,7 @@ def get_environment_score(
             (conditions["vex_aligned"]["points"] if conditions["vex_aligned"]["met"] else 0)
         )
         momentum_pts = (
-            (conditions["vcoc_signal"]["points"] if conditions["vcoc_signal"]["met"] else 0) +
-            (conditions["fut_bs_ratio"]["points"] if conditions["fut_bs_ratio"]["met"] else 0) +
+            (conditions["vcoc_fut_combined"]["points"] if conditions["vcoc_fut_combined"]["met"] else 0) +
             (conditions["obi_negative"]["points"] if conditions["obi_negative"]["met"] else 0)
         )
         context_pts = (
@@ -251,8 +243,11 @@ def get_environment_score(
             )
 
         snap_vol     = gex_data.get("snap_volume", 0)
-        avg_snap_vol = gex_data.get("avg_snap_volume_20d", 1)
-        volume_ok    = snap_vol > 0.30 * avg_snap_vol
+        avg_snap_vol = gex_data.get("avg_snap_volume_20d")
+        if avg_snap_vol is None or avg_snap_vol == 0:
+            volume_ok = True
+        else:
+            volume_ok = snap_vol > 0.30 * avg_snap_vol
 
         if score >= settings.GATE_GO_THRESHOLD:
             verdict = GateVerdict.GO.value
