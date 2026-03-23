@@ -10,7 +10,7 @@ Grades: A ≥ 80 | B ≥ 65 | C ≥ 50 | D < 50
 S_score normalisation:
   Screener formula: (weighted sum of 7 factors) × 10
   Max possible = (W_DELTA×0.50 + W_EFF_RATIO + W_LIQUIDITY + W_IV
-                  + W_THETA + W_GAMMA + W_VEGA) × 10 = 150
+                  + W_GAMMA + W_VEGA + W_MOMENTUM×3.0) × 10 = 180
   Practical 99th-pct for screened options ≈ 120 → used as normaliser.
 """
 from optdash.config import settings
