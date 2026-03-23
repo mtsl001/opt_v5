@@ -281,6 +281,9 @@ def generate_recommendation(
     # recommendation on the very next tick.  Return None cleanly; the next
     # tick retries from scratch.
     try:
+        buckets = conf_result["buckets"]
+        buckets["cold_start"] = conf_result.get("cold_start", False)
+        
         trade_id = trades.create_trade(jconn, {
             "trade_date":        trade_date,
             "snap_time":         snap_time,
@@ -307,7 +310,7 @@ def generate_recommendation(
             "iv_at_entry":       strike.get("iv"),
             "spot_at_entry":     gex_data.get("spot"),
             "dte":               strike.get("dte"),
-            "conf_buckets":      json.dumps(conf_result["buckets"]),
+            "conf_buckets":      json.dumps(buckets),
         })
     except Exception:
         logger.error(

@@ -41,6 +41,7 @@ def compute_quality_score(strike: dict, gate_score: int, confidence: int) -> dic
 
     # C2: Gate adequacy — normalized against the GO threshold natively
     gate_go = settings.GATE_GO_THRESHOLD or 7
+    # gate_score > GO_THRESHOLD also yields full 35 — bonus beyond GO is not rewarded in C2
     c2 = min(35, (gate_score / gate_go) * 35)
 
     # C3: Confidence adequacy

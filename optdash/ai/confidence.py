@@ -76,12 +76,16 @@ def compute_confidence(
         b4 = min(settings.CONFIDENCE_B4_MAX, int(win_rate * settings.CONFIDENCE_B4_SCALE))
 
     if cold_start:
-        raw = int((b1 + b2 + b3) * (100.0 / 90.0))
+        B_ACTIVE_MAX = 40 + 25 + 25  # B1 + B2 + B3 max points
+        raw = int((b1 + b2 + b3) * (100.0 / B_ACTIVE_MAX))
     else:
         raw = b1 + b2 + b3 + b4
 
+    raw_pre_session = raw
+
     # Session adjustments
     if session == MarketSession.MIDDAY_CHOP:
+        # Defaults to 1.0 (no confirm) if missing on VEX/exception paths
         pcr_mod = direction_result.get("pcr_modifier", 1.0)
         smart_penalty = getattr(settings, "SESSION_MIDDAY_SMART_PENALTY", False)
         if smart_penalty and b1 >= 35 and pcr_mod > 1.0:
@@ -101,6 +105,6 @@ def compute_confidence(
             "structural":       b3,
             "historical":       b4,
         },
-        "session_adjusted": raw != (b1 + b2 + b3 + b4),
+        "session_adjusted": raw != raw_pre_session,
         "cold_start":       cold_start,
     }
