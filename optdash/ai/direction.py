@@ -185,7 +185,9 @@ def get_directional_bias(
             underlying, trade_date, snap_time, e,
         )
         return {"direction": Direction.NEUTRAL.value, "ce_weight": 0,
-                "pe_weight": 0, "margin": 0, "signals": []}
+                "pe_weight": 0, "margin": 0, "signals": [],
+                "vex_data": {}, "unique_source_count": 0,
+                "conviction": "NEUTRAL", "pcr_modifier": 1.0, "veto": None}
 
 
 def _vcoc_spike_age(
