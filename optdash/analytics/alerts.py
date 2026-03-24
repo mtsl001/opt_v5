@@ -16,12 +16,17 @@ def _check_skew_vex_convergence(
     vex_data:  dict,
     underlying: str,
     snap_time: str,
+    prev_skew_data: dict | None = None,
+    prev_vex_data:  dict | None = None,
 ) -> dict | None:
     """
-    HIGH_CONVICTION_BEAR alert fires when:
-      1. Skew is STEEPENING (put-wing demand accelerating)
-      AND
+    HIGH_CONVICTION_BEAR alert fires on the TRANSITION tick when:
+      1. Skew flips to STEEPENING (wasn't STEEPENING last snap), AND
       2. VEX total is below -threshold (bearish vanna pressure from dealers)
+
+    Issue-5 fix: added prev_skew_data / prev_vex_data transition guard.
+    Without this the alert fired on every tick where conditions held,
+    flooding the feed during sustained bear setups.
     """
     if not settings.SKEW_STEEPENING_VEX_CONFIRM:
         return None
@@ -34,6 +39,17 @@ def _check_skew_vex_convergence(
     vex_bearish     = (vex_total < -vex_threshold)
 
     if skew_steepening and vex_bearish:
+        # Transition guard: only fire if previous snap was NOT in this combined state.
+        prev_skew_steepening = (
+            prev_skew_data.get("skew_direction") == "STEEPENING"
+            if prev_skew_data else False
+        )
+        prev_vex_bearish = (
+            (prev_vex_data.get("vex_total_M", 0.0) or 0.0) < -vex_threshold
+            if prev_vex_data else False
+        )
+        if prev_skew_steepening and prev_vex_bearish:
+            return None   # condition held last tick too — not a new transition
         return _make_alert(
             time=snap_time,
             type_=AlertType.HIGH_CONVICTION_BEAR,
@@ -44,10 +60,19 @@ def _check_skew_vex_convergence(
         )
     return None
 
-def _check_zgl_proximity(gex_data: dict, spot: float | None, snap_time: str) -> dict | None:
+def _check_zgl_proximity(
+    gex_data: dict,
+    spot: float | None,
+    snap_time: str,
+    prev_gex_data: dict | None = None,
+) -> dict | None:
     """
-    Fires APPROACHING_ZGL / BELOW_ZGL alert when spot moves around the
-    Zero Gamma Level.
+    Fires APPROACHING_ZGL / BELOW_ZGL alert on the TRANSITION tick when
+    spot crosses the Zero Gamma Level boundary.
+
+    Issue-5 fix: added prev_gex_data transition guard.
+    Without this the BELOW_ZGL / APPROACHING_ZGL alerts fired every tick
+    while spot remained below / near ZGL, flooding the alert feed.
     """
     zgl       = gex_data.get("zgl")
     above_zgl = gex_data.get("above_zgl")
@@ -59,6 +84,10 @@ def _check_zgl_proximity(gex_data: dict, spot: float | None, snap_time: str) -> 
     proximity_threshold = settings.ZGL_PROXIMITY_PCT
 
     if above_zgl is False:
+        # Emit only on the first tick spot crosses below ZGL.
+        prev_above = prev_gex_data.get("above_zgl") if prev_gex_data else None
+        if prev_above is False:
+            return None   # was already below ZGL last tick — not a new transition
         return _make_alert(
             time=snap_time,
             type_=AlertType.BELOW_ZGL,
@@ -72,6 +101,16 @@ def _check_zgl_proximity(gex_data: dict, spot: float | None, snap_time: str) -> 
         )
 
     if above_zgl is True and abs(dist_pct) < proximity_threshold:
+        # Emit only when spot first enters the proximity band.
+        prev_above = prev_gex_data.get("above_zgl") if prev_gex_data else None
+        prev_dist  = prev_gex_data.get("spot_vs_zgl") if prev_gex_data else None
+        prev_in_band = (
+            prev_above is True
+            and prev_dist is not None
+            and abs(prev_dist) < proximity_threshold
+        )
+        if prev_in_band:
+            return None   # was already inside proximity band last tick
         return _make_alert(
             time=snap_time,
             type_=AlertType.APPROACHING_ZGL,
@@ -229,14 +268,27 @@ def get_alerts(
         gex_current = get_net_gex(conn, trade_date, snap_time, underlying)
         spot = gex_current.get("spot")
 
+        # Derive previous-snap gex for ZGL transition guard (Issue-5).
+        # prev_snap_time is the last entry before snap_time in gex_w (already fetched).
+        prev_gex_snap = gex_w[-2]["snap_time"] if len(gex_w) >= 2 else None
+        prev_gex_data = get_net_gex(conn, trade_date, prev_gex_snap, underlying) if prev_gex_snap else None
+
         # Skew x VEX convergence (B-2)
         skew_data = get_iv_skew(conn, trade_date, snap_time, underlying)
         vex_data  = get_vex_cex_current(conn, trade_date, snap_time, underlying, gex_data=gex_current)
-        skew_vex_alert = _check_skew_vex_convergence(skew_data, vex_data, underlying, snap_time)
+
+        # Derive previous-snap skew/vex for HIGH_CONVICTION_BEAR transition guard (Issue-5).
+        prev_skew_data = get_iv_skew(conn, trade_date, prev_gex_snap, underlying) if prev_gex_snap else None
+        prev_vex_data  = get_vex_cex_current(conn, trade_date, prev_gex_snap, underlying) if prev_gex_snap else None
+
+        skew_vex_alert = _check_skew_vex_convergence(
+            skew_data, vex_data, underlying, snap_time,
+            prev_skew_data=prev_skew_data, prev_vex_data=prev_vex_data,
+        )
         if skew_vex_alert:
             alerts.append(skew_vex_alert)
-            
-        zgl_alert = _check_zgl_proximity(gex_current, spot, snap_time)
+
+        zgl_alert = _check_zgl_proximity(gex_current, spot, snap_time, prev_gex_data=prev_gex_data)
         if zgl_alert:
             alerts.append(zgl_alert)
 

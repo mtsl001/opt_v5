@@ -611,6 +611,23 @@ class Settings(BaseSettings):
             raise ValueError(f"VOLUME_SPIKE_THRESHOLD must be > 1.0, got {v}")
         return v
 
+    @field_validator("SCREENER_MAX_DELTA")
+    @classmethod
+    def _check_screener_delta_range(cls, v: float, info) -> float:
+        """Issue-3: enforce SCREENER_MAX_DELTA > SCREENER_MIN_DELTA at startup.
+
+        If both are equal the SQL delta normalisation formula becomes (delta - min) / 0
+        which DuckDB returns as NULL — silently zeroing the delta scoring bucket for
+        every strike with no error logged.
+        """
+        min_delta = info.data.get("SCREENER_MIN_DELTA", 0.0)
+        if v <= min_delta:
+            raise ValueError(
+                f"SCREENER_MAX_DELTA ({v}) must be strictly > "
+                f"SCREENER_MIN_DELTA ({min_delta})"
+            )
+        return v
+
     @field_validator("CONFIDENCE_B4_SCALE")
     @classmethod
     def _check_b4_scale(cls, v: int, info) -> int:
