@@ -25,7 +25,8 @@ from optdash.analytics.gex import get_net_gex
 
 
 def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
-                        snap_time: str, underlying: str) -> dict:
+                        snap_time: str, underlying: str,
+                        gex_data: dict | None = None) -> dict:
     """Current VEX/CEX snapshot."""
     try:
         row = conn.execute("""
@@ -40,7 +41,7 @@ def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
                 MIN(dte)                                             AS dte
             FROM options_data
             WHERE trade_date=? AND snap_time=? AND underlying=?
-              AND expiry_tier='TIER1'
+              AND expiry_tier IN ('TIER1', 'TIER2')
         """, [trade_date, snap_time, underlying]).fetchone()
         if not row:
             return {}
@@ -52,7 +53,8 @@ def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
         cex_signal = _classify_cex(cex_total, underlying)
         
         # Fetch net GEX sign to determine charm hedging direction (VEX-5)
-        gex_data = get_net_gex(conn, trade_date, snap_time, underlying)
+        if gex_data is None:
+            gex_data = get_net_gex(conn, trade_date, snap_time, underlying)
         net_gex   = gex_data.get("gex_all_B", 0.0)
 
         interp     = _interpret(vex_signal, cex_signal, dealer_oc, net_gex)

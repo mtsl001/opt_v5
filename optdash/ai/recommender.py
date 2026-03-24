@@ -119,7 +119,7 @@ def generate_recommendation(
     try:
         vex_data = (
             dir_res["vex_data"] if "vex_data" in dir_res
-            else get_vex_cex_current(conn, trade_date, snap_time, underlying)
+            else get_vex_cex_current(conn, trade_date, snap_time, underlying, gex_data=gex_data)
         )
     except Exception:
         logger.warning(

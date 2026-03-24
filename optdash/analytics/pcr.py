@@ -174,14 +174,14 @@ def get_pcr_series(
             div_t2     = r[6] or 0.0
             dte_t1     = int(r[7] or 99)
             
-            div_mean_t1  = r[8] or 0.0
-            div_std_t1   = r[9] or 0.0
-            div_mean_t2  = r[10] or 0.0
-            div_std_t2   = r[11] or 0.0
-            div_lag_t1   = r[12]
-            div_lag_t2   = r[13]
-            smoothed_obi_t1 = r[14] or 0.0
-            smoothed_obi_t2 = r[15] or 0.0
+            div_mean_t1  = r[10] or 0.0
+            div_std_t1   = r[11] or 0.0
+            div_mean_t2  = r[12] or 0.0
+            div_std_t2   = r[13] or 0.0
+            div_lag_t1   = r[14]
+            div_lag_t2   = r[15]
+            smoothed_obi_t1 = r[16] or 0.0
+            smoothed_obi_t2 = r[17] or 0.0
             
             use_tier2 = (dte_t1 <= 1)
             primary_div = div_t2 if use_tier2 else div_t1

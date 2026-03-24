@@ -86,7 +86,7 @@ def get_strikes(
                         ? * (ABS(o.delta) - ?) / (? - ?)
                         -- 2. Liquidity (capped per underlying) with bid-ask spread penalty
                       + ? * LEAST(1.0, o.oi * o.ltp / 1e7 / ?)
-                          * (1.0 - LEAST(1.0, COALESCE(o.depth_ask1_price - o.depth_bid1_price, 0) / NULLIF(o.ltp * 0.05, 0)))
+                          * (1.0 - LEAST(1.0, COALESCE(o.ask1_price - o.bid1_price, 0) / NULLIF(o.ltp * 0.05, 0)))
                         -- 3. IV: lower is better (gated by IVP < 50)
                       + ? * ? * (1.0 - LEAST(1.0, o.iv / 100.0))
                         -- 4. Gamma: convexity (cap at 0.01)

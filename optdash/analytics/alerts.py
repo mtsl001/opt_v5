@@ -217,16 +217,17 @@ def get_alerts(
                     message=f"Current volume {ratio:.1f}x above rolling median -- unusual activity detected.",
                 ))
 
+        # ZGL proximity (B-7) / Need gex_current for VEX caching
+        gex_current = get_net_gex(conn, trade_date, snap_time, underlying)
+        spot = gex_current.get("spot")
+
         # Skew x VEX convergence (B-2)
         skew_data = get_iv_skew(conn, trade_date, snap_time, underlying)
-        vex_data  = get_vex_cex_current(conn, trade_date, snap_time, underlying)
+        vex_data  = get_vex_cex_current(conn, trade_date, snap_time, underlying, gex_data=gex_current)
         skew_vex_alert = _check_skew_vex_convergence(skew_data, vex_data, underlying, snap_time)
         if skew_vex_alert:
             alerts.append(skew_vex_alert)
             
-        # ZGL proximity (B-7)
-        gex_current = get_net_gex(conn, trade_date, snap_time, underlying)
-        spot = gex_current.get("spot")
         zgl_alert = _check_zgl_proximity(gex_current, spot, snap_time)
         if zgl_alert:
             alerts.append(zgl_alert)

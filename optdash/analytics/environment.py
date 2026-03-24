@@ -8,6 +8,7 @@ from optdash.analytics.coc import get_coc_latest, get_atm_obi, get_futures_obi
 from optdash.analytics.iv  import get_ivr_ivp
 from optdash.analytics.pcr import get_pcr
 from optdash.analytics.vex_cex import get_vex_cex_current
+from optdash.analytics.microstructure import get_volume_velocity
 from optdash.utils import snap_to_min
 
 
@@ -247,7 +248,7 @@ def get_environment_score(
         penalty_score = sum(c["points"] for c in conditions.values() if c["met"] and c.get("is_penalty"))
         score = max(0, min(bonus_score + penalty_score, settings.GATE_MAX_SCORE))
 
-        _raw_max = sum(c["points"] for c in conditions.values() if not c.get("is_penalty"))
+        _raw_max = sum(c["points"] for c in conditions.values() if c["met"] and not c.get("is_penalty"))
         # Fix C-2: use exact (c9_pts - 2) padding instead of magic +2 so a new
         # 2-pt condition doesn't silently bypass the overflow guard.
         # c9_pts is 4 on DTE=1 (Dealer O'Clock bonus) vs the normal 2-pt value,
@@ -260,8 +261,13 @@ def get_environment_score(
                 "Update GATE_MAX_SCORE and re-calibrate thresholds in config.py."
             )
 
-        snap_vol     = gex_data.get("snap_volume", 0)
-        avg_snap_vol = gex_data.get("avg_snap_volume_20d")
+        vol_data = get_volume_velocity(conn, trade_date, underlying)
+        if vol_data:
+            last_vol = vol_data[-1]
+            snap_vol = last_vol["vol_total"]
+            avg_snap_vol = last_vol["baseline_vol"]
+        else:
+            snap_vol, avg_snap_vol = 0, 0
         if avg_snap_vol is None or avg_snap_vol == 0:
             volume_ok = True
         else:
