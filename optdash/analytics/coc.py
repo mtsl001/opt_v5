@@ -248,7 +248,16 @@ def _compute_vcoc_from_series(rows: list, i: int) -> float:
     return round((rows[i][1] or 0) - (rows[i - lookback][1] or 0), 2)
 
 
-def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = 30, coc_fv_premium: float = None) -> str:
+def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = None, coc_fv_premium: float = None) -> str:
+    """Classify the CoC/V_CoC snapshot into a signal label.
+
+    Fix E-1: default dte changed from 30 to None.  A dte=30 default caused
+    near-expiry V_CoC (e.g. DTE=2) to use annualization factor 365/30≈12.2
+    instead of the correct 365/2=182.5 — a 15x underestimate that suppressed
+    VELOCITY_BULL/BEAR signals on expiry week.  All callers pass dte explicitly;
+    the None default is a safety net to raise AttributeError rather than silently
+    produce a wrong signal when dte is omitted.
+    """
     if spot > 0 and dte > 0:
         vcoc_pct = (vcoc / spot) * (365 / dte) * 100
         coc_pct  = (coc  / spot) * (365 / dte) * 100

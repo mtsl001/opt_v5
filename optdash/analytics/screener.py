@@ -57,7 +57,7 @@ def get_strikes(
         min_dte = min_dte_row[0] if min_dte_row and min_dte_row[0] is not None else 99
         eff_cap = settings.SCREENER_MIN_EFF_RATIO
         if min_dte <= 2:
-            eff_cap = max(eff_cap, 0.20)  # Relaxed eff cap for DTE<=2
+            eff_cap = max(eff_cap, settings.SCREENER_EFF_RATIO_DTE2)  # Relaxed eff cap for DTE<=2
 
         result = conn.execute(f"""
             WITH spot_cte AS (

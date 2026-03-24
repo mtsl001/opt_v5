@@ -97,14 +97,19 @@ def _get_vex_cex_series(conn, trade_date, underlying) -> list[dict]:
                 SUM(cex)                                                         AS cex_total_M,
                 SUM(CASE WHEN option_type='CE' THEN cex ELSE 0 END)              AS cex_ce_M,
                 SUM(CASE WHEN option_type='PE' THEN cex ELSE 0 END)              AS cex_pe_M,
-                AVG(spot) AS spot, MIN(dte) AS dte
+                AVG(spot) AS spot, MIN(dte) AS dte,
+                -- Fix H-1: include net GEX so _interpret() uses actual GEX sign
+                -- per snap instead of the hardcoded 0.0 that made Dealer O'Clock
+                -- direction always wrong across the full day series.
+                SUM(gex) / ? AS gex_all_B
             FROM options_data
             WHERE trade_date=? AND underlying=? AND expiry_tier='TIER1'
             GROUP BY snap_time ORDER BY snap_time
-        """, [trade_date, underlying]).fetchall()
+        """, [settings.GEX_SCALING, trade_date, underlying]).fetchall()
         result = []
         for r in rows:
             vex, cex, dte = r[1] or 0, r[4] or 0, r[8] or 7
+            gex_all_B    = r[9] or 0.0  # actual net GEX for this snap
             dealer_oc  = _is_dealer_oclock(r[0], dte, underlying, trade_date)
             # Pass underlying so per-underlying thresholds are applied
             # consistently across the series (not just the current snap).
@@ -117,7 +122,8 @@ def _get_vex_cex_series(conn, trade_date, underlying) -> list[dict]:
                 "cex_ce_M": round(r[5] or 0, 2), "cex_pe_M": round(r[6] or 0, 2),
                 "spot": r[7], "dte": dte, "dealer_oclock": dealer_oc,
                 "vex_signal": vex_sig, "cex_signal": cex_sig,
-                "interpretation": _interpret(vex_sig, cex_sig, dealer_oc, net_gex=0.0),
+                # Fix H-1: pass per-snap gex_all_B not hardcoded 0.0
+                "interpretation": _interpret(vex_sig, cex_sig, dealer_oc, net_gex=gex_all_B),
             })
         return result
     except Exception as e:

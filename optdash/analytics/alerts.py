@@ -34,16 +34,14 @@ def _check_skew_vex_convergence(
     vex_bearish     = (vex_total < -vex_threshold)
 
     if skew_steepening and vex_bearish:
-        return {
-            "type":        "HIGH_CONVICTION_BEAR",
-            "time":        snap_time,
-            "severity":    "HIGH",
-            "direction":   "PE",
-            "headline":    f"Skew steepening ({skew_data.get('skew', 'N/A')}%) + VEX bearish ({round(vex_total, 2)} Rs M)",
-            "message":     f"vanna-accelerated selling pressure confirmed. High-conviction downside setup.",
-            "skew":        skew_data.get("skew"),
-            "vex_total_M": vex_total,
-        }
+        return _make_alert(
+            time=snap_time,
+            type_=AlertType.HIGH_CONVICTION_BEAR,
+            severity=AlertSeverity.HIGH,
+            direction="PE",
+            headline=f"Skew steepening ({skew_data.get('skew', 'N/A')}%) + VEX bearish ({round(vex_total, 2)} Rs M)",
+            message="Vanna-accelerated selling pressure confirmed. High-conviction downside setup.",
+        )
     return None
 
 def _check_zgl_proximity(gex_data: dict, spot: float | None, snap_time: str) -> dict | None:
@@ -61,28 +59,30 @@ def _check_zgl_proximity(gex_data: dict, spot: float | None, snap_time: str) -> 
     proximity_threshold = settings.ZGL_PROXIMITY_PCT
 
     if above_zgl is False:
-        return {
-            "type":        "BELOW_ZGL",
-            "time":        snap_time,
-            "severity":    "HIGH",
-            "direction":   None,
-            "headline":    f"Below Zero Gamma Level ({zgl})",
-            "message":     f"Spot is {abs(dist_pct):.1f}% BELOW Zero Gamma Level. Dealers net short gamma — trending/volatile regime. Avoid mean-reversion strategies.",
-            "zgl":         zgl,
-            "spot_vs_zgl": dist_pct,
-        }
+        return _make_alert(
+            time=snap_time,
+            type_=AlertType.BELOW_ZGL,
+            severity=AlertSeverity.HIGH,
+            direction=None,
+            headline=f"Below Zero Gamma Level ({zgl})",
+            message=(
+                f"Spot is {abs(dist_pct):.1f}% BELOW Zero Gamma Level. "
+                "Dealers net short gamma — trending/volatile regime. Avoid mean-reversion strategies."
+            ),
+        )
 
     if above_zgl is True and abs(dist_pct) < proximity_threshold:
-        return {
-            "type":        "APPROACHING_ZGL",
-            "time":        snap_time,
-            "severity":    "MEDIUM",
-            "direction":   None,
-            "headline":    f"Approaching Zero Gamma Level ({zgl})",
-            "message":     f"Spot is within {abs(dist_pct):.1f}% of Zero Gamma Level. If spot crosses below ZGL, regime flips to trending. Monitor closely.",
-            "zgl":         zgl,
-            "spot_vs_zgl": dist_pct,
-        }
+        return _make_alert(
+            time=snap_time,
+            type_=AlertType.APPROACHING_ZGL,
+            severity=AlertSeverity.MEDIUM,
+            direction=None,
+            headline=f"Approaching Zero Gamma Level ({zgl})",
+            message=(
+                f"Spot is within {abs(dist_pct):.1f}% of Zero Gamma Level. "
+                "If spot crosses below ZGL, regime flips to trending. Monitor closely."
+            ),
+        )
     return None
 
 
@@ -93,7 +93,11 @@ def get_alerts(
     underlying: str,
     lookback_snaps: int = 12,
 ) -> list[dict]:
-    """Return list of alerts from the last 60 min (ordered newest first)."""
+    """Return list of alerts from the last N snaps (ordered newest first).
+
+    lookback_snaps=12 covers 12 minutes at 1-min cadence (not 60 min).
+    Increase to 60 for a 60-minute lookback window at 1-min cadence.
+    """
     alerts = []
 
     try:
@@ -133,7 +137,7 @@ def get_alerts(
             prev_coc = coc_w[-2]
             if (cur_coc["signal"]  in _velocity_signals and
                     prev_coc["signal"] not in _velocity_signals):
-                if cur_coc["snap_time"] > settings.ALERT_OPENING_SUPPRESS_END:
+                if cur_coc["snap_time"] >= settings.ALERT_OPENING_SUPPRESS_END:
                     vcoc = cur_coc.get("v_coc_15m", 0)
                     dir_ = "CE" if vcoc > 0 else "PE"
                     alerts.append(_make_alert(
@@ -146,7 +150,7 @@ def get_alerts(
                                 f"{'institutional long accumulation' if vcoc > 0 else 'institutional unwinding'}.",
                     ))
         elif len(coc_w) == 1 and coc_w[0]["signal"] in _velocity_signals:
-            if coc_w[0]["snap_time"] > settings.ALERT_OPENING_SUPPRESS_END:
+            if coc_w[0]["snap_time"] >= settings.ALERT_OPENING_SUPPRESS_END:
                 vcoc = coc_w[0].get("v_coc_15m", 0)
                 dir_ = "CE" if vcoc > 0 else "PE"
                 alerts.append(_make_alert(
@@ -189,7 +193,7 @@ def get_alerts(
             cur_vol  = vol_w[-1]
             prev_vol = vol_w[-2]
             if cur_vol["signal"] == "SPIKE" and prev_vol["signal"] != "SPIKE":
-                if cur_vol["snap_time"] > settings.ALERT_OPENING_SUPPRESS_END:
+                if cur_vol["snap_time"] >= settings.ALERT_OPENING_SUPPRESS_END:
                     ratio = cur_vol["volume_ratio"]
                     sev   = AlertSeverity.HIGH if ratio >= 3.0 else AlertSeverity.MEDIUM
                     alerts.append(_make_alert(
@@ -201,7 +205,7 @@ def get_alerts(
                         message=f"Current volume {ratio:.1f}x above rolling median -- unusual activity detected.",
                     ))
         elif len(vol_w) == 1 and vol_w[0]["signal"] == "SPIKE":
-            if vol_w[0]["snap_time"] > settings.ALERT_OPENING_SUPPRESS_END:
+            if vol_w[0]["snap_time"] >= settings.ALERT_OPENING_SUPPRESS_END:
                 ratio = vol_w[0]["volume_ratio"]
                 sev   = AlertSeverity.HIGH if ratio >= 3.0 else AlertSeverity.MEDIUM
                 alerts.append(_make_alert(

@@ -103,14 +103,19 @@ def get_net_gex(
         if _peak_cache is not None:
             _peak_cache.setdefault((trade_date, underlying), peak)
 
-        # pct_of_peak for gex_all and gex_near
-        pct      = (abs(gex_all)  / peak      * 100) if peak      != 0 else 0.0
-        pct_near = (abs(gex_near) / peak_near * 100) if peak_near != 0 else 0.0
+        # Fix D-1: treat None peak as "unavailable" (DuckDB error / stale cache)
+        # so gate C1 is NOT falsely fired during infrastructure failures.
+        # 0.0 peak was silently dividing gex_all/0 → pct=0 → c1_met=True (wrong).
+        pct      = (abs(gex_all)  / peak      * 100) if (peak  and peak  > 0) else None
+        pct_near = (abs(gex_near) / peak_near * 100) if (peak_near and peak_near > 0) else None
 
         # GEX-3: regime_near driven by TIER1+TIER2 only (intraday signal);
         # regime (all-inclusive) kept for API context and historical compat.
-        regime      = _classify_regime(gex_all,  pct)
-        regime_near = _classify_regime(gex_near, pct_near)
+        # Fix D-1: when peak is unavailable (None), default pct to 0.0 for
+        # regime classification — regime becomes POSITIVE_CHOP or NEGATIVE_TREND
+        # based solely on GEX sign, without the declining-percentage gate.
+        regime      = _classify_regime(gex_all,  pct if pct is not None else 0.0)
+        regime_near = _classify_regime(gex_near, pct_near if pct_near is not None else 0.0)
 
         # GEX-2: Zero Gamma Level
         zgl_data = _compute_zero_gamma_level(conn, trade_date, snap_time,
@@ -332,8 +337,12 @@ def _get_gex_peak(
         result = float(row[0]) if row and row[0] else 0.0
         _PEAK_CACHE[cache_key] = result
         return result
-    except Exception:
-        return 0.0
+    except Exception as e:
+        # Fix D-1: log the failure so DuckDB errors are visible in monitoring.
+        # Return None (not 0.0) so callers can detect unavailability and avoid
+        # falsely firing the GEX-declining gate condition on infrastructure errors.
+        logger.warning("_get_gex_peak failed for {}/{}: {}", trade_date, underlying, e)
+        return None
 
 
 def _compute_zero_gamma_level(
@@ -376,12 +385,18 @@ def _compute_zero_gamma_level(
 
         # Use the first zero crossing (lowest strike — primary ZGL)
         idx = sign_changes[0]
-        # Linear interpolation between the two strikes bracketing the crossing
-        zgl = float(np.interp(
-            0,
-            [cum_gex[idx], cum_gex[idx + 1]],
-            [strikes[idx], strikes[idx + 1]],
-        ))
+        # Fix D-2: Replace np.interp which requires monotonically increasing xp.
+        # At the zero crossing, cum_gex changes sign so [cum_gex[idx], cum_gex[idx+1]]
+        # is NOT monotonically increasing — np.interp produced wrong ZGL values.
+        # Correct: standard two-point linear interpolation formula.
+        #   zgl = s[idx] + (s[idx+1] - s[idx]) × (0 - cum_gex[idx])
+        #                                        / (cum_gex[idx+1] - cum_gex[idx])
+        denom = cum_gex[idx + 1] - cum_gex[idx]
+        if abs(denom) < 1e-10:
+            zgl = float((strikes[idx] + strikes[idx + 1]) / 2)
+        else:
+            zgl = float(strikes[idx] + (strikes[idx + 1] - strikes[idx]) *
+                        (-cum_gex[idx]) / denom)
 
         dist_pct  = round((spot - zgl) / zgl * 100, 2) if (spot and zgl) else None
         above_zgl = bool(spot > zgl) if (spot is not None and zgl) else None

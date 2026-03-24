@@ -266,6 +266,7 @@ def _trailing_pcr_metrics(conn: duckdb.DuckDBPyConnection, trade_date: str, snap
             FROM options_data
             WHERE trade_date=? AND underlying=? AND snap_time <= ?
               AND expiry_tier=?
+              AND instrument_type='OPT'  -- Fix F-1: exclude FUT rows (option_type=NULL)
             GROUP BY snap_time
             ORDER BY snap_time DESC
             LIMIT ?

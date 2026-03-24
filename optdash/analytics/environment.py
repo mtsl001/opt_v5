@@ -158,14 +158,27 @@ def get_environment_score(
             c7_note = "Term structure data unavailable"
             c7_met = False
         else:
-            c7_score = -1 if ts == "BACKWARDATION" else 0
-            c7_met = (ts == "BACKWARDATION")
-            c7_note = f"Shape = {ts} {'⚠️ PENALTY -1' if ts == 'BACKWARDATION' else ''}"
+            if ts == "CONTANGO":
+                # Fix C-1: CONTANGO earns +1 gate point — reward for structurally
+                # calm conditions where premium buyers have edge. Previously CONTANGO
+                # scored 0 (same as FLAT), suppressing a valid positive signal.
+                c7_score = 1
+                c7_met   = True
+                c7_note  = "Shape = CONTANGO ✓ (+1)"
+            elif ts == "BACKWARDATION":
+                c7_score = -1
+                c7_met   = True
+                c7_note  = "Shape = BACKWARDATION ⚠️ PENALTY -1"
+            else:  # FLAT
+                c7_score = 0
+                c7_met   = False
+                c7_note  = "Shape = FLAT (neutral)"
 
         conditions["term_structure_ok"] = {
             "met": c7_met, "value": ts or "UNKNOWN",
             "points": c7_score, "note": c7_note,
-            "is_penalty": True
+            # is_penalty only True for the BACKWARDATION case (negative points)
+            "is_penalty": (c7_score < 0)
         }
 
         # C8: Session not midday chop (1 pt)
@@ -235,7 +248,12 @@ def get_environment_score(
         score = max(0, min(bonus_score + penalty_score, settings.GATE_MAX_SCORE))
 
         _raw_max = sum(c["points"] for c in conditions.values() if not c.get("is_penalty"))
-        if _raw_max > settings.GATE_MAX_SCORE + 2: # +2 dynamic padding for DTE=1
+        # Fix C-2: use exact (c9_pts - 2) padding instead of magic +2 so a new
+        # 2-pt condition doesn't silently bypass the overflow guard.
+        # c9_pts is 4 on DTE=1 (Dealer O'Clock bonus) vs the normal 2-pt value,
+        # giving exactly +2 headroom when needed and 0 otherwise.
+        _dynamic_pad = c9_pts - 2  # 2 on DTE=1, 0 otherwise
+        if _raw_max > settings.GATE_MAX_SCORE + _dynamic_pad:
             raise RuntimeError(
                 f"Gate conditions sum to {_raw_max} pts but "
                 f"GATE_MAX_SCORE={settings.GATE_MAX_SCORE}. "
@@ -262,8 +280,10 @@ def get_environment_score(
             if not volume_ok:
                 verdict = GateVerdict.WAIT.value
         elif verdict == GateVerdict.WAIT.value:
+            # Fix C-3: downgrade WAIT → NO_GO on low volume.
+            # Previous code set verdict = GateVerdict.WAIT.value (no-op).
             if not volume_ok:
-                verdict = GateVerdict.WAIT.value
+                verdict = GateVerdict.NO_GO.value
 
         return {
             "score":      score,

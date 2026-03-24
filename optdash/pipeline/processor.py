@@ -151,6 +151,11 @@ _OUT_COLS = [
     "ask4_qty", "ask4_price", "ask4_orders",
     "ask5_qty", "ask5_price", "ask5_orders",
     "gex", "vex", "cex", "expiry_tier", "dte",
+    # Fix O-1: avg_volume_20d fetched from BQ must be persisted to Parquet so
+    # screener.py momentum factor (volume / avg_volume_20d) is non-NULL.
+    # Absent here it was silently dropped by reindex(), producing NULL s_scores
+    # that blocked every recommendation at pre-flight Rule 5.
+    "avg_volume_20d",
 ]
 
 
@@ -194,8 +199,11 @@ def process_and_write(df: pd.DataFrame, duck_conn=None) -> str | None:
             _process_underlying(str(underlying), u_df.copy(), lot_size, duck_conn,
                                  _refreshed)
         except Exception as e:
-            logger.error("processor: failed for {}: {}", underlying, e)
-            raise
+            # Fix O-4: continue instead of raise so a bad-data failure for one
+            # underlying does not abort processing of the remaining underlyings.
+            logger.error("processor: failed for {} (skipping): {}", underlying, e,
+                         exc_info=True)
+            continue
 
     if _skipped:
         logger.debug(
@@ -261,6 +269,15 @@ def _normalize_types(df: pd.DataFrame) -> pd.DataFrame:
     # Distinct from bid_qty/ask_qty (cumulative day totals).
     # NULL when fewer than N levels exist (illiquid / far-OTM strikes).
     # Loop handles all 5 levels DRY-ly; qty/orders → Int64, price → float64.
+    # Fix O-3: log a one-time warning when depth columns are absent so a BQ
+    # schema rename is discoverable at ingest time, not silently as NULL OBI.
+    depth_cols_present = any(f"depth_bid1_qty" in df.columns for _ in [1])
+    if not depth_cols_present:
+        logger.warning(
+            "_normalize_types: depth_bid1_qty column absent — "
+            "all order-book depth columns will be NULL. "
+            "Check BQ feed schema for depth_bidN_qty / depth_askN_qty columns."
+        )
     for lvl in range(1, 6):
         for side in ("bid", "ask"):
             src_q = f"depth_{side}{lvl}_qty"
@@ -472,15 +489,47 @@ def _compute_gex_vex_cex(df: pd.DataFrame, lot_size: int) -> pd.DataFrame:
     opts["_spot"] = opts["spot"].fillna(0.0)
     opts["_strike"] = opts["strike_price"].fillna(0.0)
 
-    # VEX-1 & VEX-2: Exact BSM vanna and charm.
-    # Compute using helpers with inf clip to expose raw values for VEX-3 tracking.
-    raw_vanna = opts.apply(lambda row: _compute_exact_vanna(
-        row["_spot"], row["_strike"], row["_sig_val"], row["_t_val"], r_val, float('inf')
-    ), axis=1)
-    
-    raw_charm = opts.apply(lambda row: _compute_exact_charm(
-        row["_spot"], row["_strike"], row["_sig_val"], row["_t_val"], r_val, float('inf')
-    ), axis=1)
+    # Fix O-2: Vectorized exact BSM vanna and charm using NumPy arrays.
+    # Replaces row-by-row opts.apply(lambda row: ...) which ran in pure Python
+    # over ~2,500 OPT rows per snap. NumPy operates at C-level SIMD speed.
+    s_arr  = opts["_spot"].values
+    k_arr  = opts["_strike"].values
+    sig_arr = opts["_sig_val"].values
+    t_arr  = opts["_t_val"].values
+
+    # BSM d1/d2 — vectorised; invalid inputs (s<=0, k<=0, sig<=0, t<=0) → NaN
+    with np.errstate(divide="ignore", invalid="ignore"):
+        valid = (s_arr > 0) & (k_arr > 0) & (sig_arr > 0) & (t_arr > 0)
+        sqrt_t = np.where(valid, np.sqrt(t_arr), np.nan)
+        d1 = np.where(
+            valid,
+            (np.log(np.where(valid, s_arr / k_arr, 1.0)) +
+             (r_val + 0.5 * sig_arr ** 2) * t_arr) / (sig_arr * sqrt_t),
+            np.nan,
+        )
+        d2 = d1 - sig_arr * sqrt_t
+        # N'(d1) — standard normal PDF
+        nd1  = norm.pdf(d1)                          # 0 where d1=NaN → safe
+        # Vanna = -(vega_bsm × d2) / (spot × σ × √T)
+        # vega_bsm = spot × N'(d1) × √T
+        vega_bsm    = s_arr * nd1 * sqrt_t
+        vanna_denom = s_arr * sig_arr * sqrt_t
+        raw_vanna_arr = np.where(
+            valid & (np.abs(vanna_denom) > 1e-10),
+            -(vega_bsm * d2) / vanna_denom,
+            0.0,
+        )
+        # Charm = -N'(d1) × [2rT - d2 × σ√T] / [2T × σ√T]
+        charm_num   = 2 * r_val * t_arr - d2 * sig_arr * sqrt_t
+        charm_denom = 2 * t_arr * sig_arr * sqrt_t
+        raw_charm_arr = np.where(
+            valid & (np.abs(charm_denom) > 1e-10),
+            -nd1 * (charm_num / charm_denom),
+            0.0,
+        )
+
+    raw_vanna = pd.Series(raw_vanna_arr, index=opts.index)
+    raw_charm = pd.Series(raw_charm_arr, index=opts.index)
 
     vanna = raw_vanna.clip(-settings.VANNA_CLIP, settings.VANNA_CLIP)
     charm = raw_charm.clip(-settings.CHARM_CLIP, settings.CHARM_CLIP)

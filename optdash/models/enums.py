@@ -70,12 +70,17 @@ class IVCrushSeverity(str, Enum):
 
 
 class AlertType(str, Enum):
-    COC_VELOCITY   = "COC_VELOCITY"
-    GEX_DECLINE    = "GEX_DECLINE"
-    PCR_DIVERGENCE = "PCR_DIVERGENCE"
-    OBI_SHIFT      = "OBI_SHIFT"
-    VOLUME_SPIKE   = "VOLUME_SPIKE"
-    GATE_CHANGE    = "GATE_CHANGE"
+    COC_VELOCITY       = "COC_VELOCITY"
+    GEX_DECLINE        = "GEX_DECLINE"
+    PCR_DIVERGENCE     = "PCR_DIVERGENCE"
+    OBI_SHIFT          = "OBI_SHIFT"
+    VOLUME_SPIKE       = "VOLUME_SPIKE"
+    GATE_CHANGE        = "GATE_CHANGE"
+    # Fix A-1: these types were constructed as raw strings in alerts.py,
+    # bypassing _make_alert() and breaking enum-based deduplication.
+    HIGH_CONVICTION_BEAR = "HIGH_CONVICTION_BEAR"
+    BELOW_ZGL            = "BELOW_ZGL"
+    APPROACHING_ZGL      = "APPROACHING_ZGL"
 
 
 class AlertSeverity(str, Enum):

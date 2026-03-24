@@ -31,6 +31,11 @@ def run_pre_flight(
     ltp   = strike.get("ltp") or 0
 
     if dte is not None and dte <= 0:
+        # Fix L-1: theta check intentionally skipped on DTE=0 (expiry morning).
+        # The theta/ltp ratio becomes numerically explosive when LTP approaches
+        # zero on deep-OTM strikes at expiry — the ratio loses all signal value.
+        # Alternative risk controls for DTE=0 are: Rule 7 (gate floor), Rule 8
+        # (confidence floor), and the DTE=0 Dealer O'Clock hard block.
         theta_cap = None
     elif dte is not None and dte <= 2:
         theta_cap = settings.PREFLIGHT_THETA_RATIO_DTE12
@@ -51,10 +56,10 @@ def run_pre_flight(
     # on real proximity data, not on missing data.
     raw_dist      = gex_data.get("max_pain_distance_pct")
     max_pain_dist = raw_dist if raw_dist is not None else 99.0
-    if abs(max_pain_dist) < settings.PREFLIGHT_MAX_PAIN_PROXIMITY * 100:
+    if abs(max_pain_dist) < settings.PREFLIGHT_MAX_PAIN_PROXIMITY_PCT:
         failures.append(
             f"Spot within {abs(max_pain_dist):.2f}% of max pain "
-            f"(threshold {settings.PREFLIGHT_MAX_PAIN_PROXIMITY*100:.1f}%) -- stop-hunt zone"
+            f"(threshold {settings.PREFLIGHT_MAX_PAIN_PROXIMITY_PCT:.1f}%) -- stop-hunt zone"
         )
 
     # Rule 5: S_score floor

@@ -45,7 +45,7 @@ def get_volume_velocity(conn: duckdb.DuckDBPyConnection, trade_date: str,
                 "vol_total":    int(vols[i]),
                 "baseline_vol": int(baseline),
                 "volume_ratio": round(ratio, 2),
-                "signal":       "SPIKE" if ratio >= 2.0 else "NORMAL",
+                "signal":       "SPIKE" if ratio >= settings.VOLUME_SPIKE_THRESHOLD else "NORMAL",
             })
         return result
     except Exception as e:

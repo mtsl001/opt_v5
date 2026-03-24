@@ -34,7 +34,10 @@ def compute_confidence(
     b1 = min(settings.CONFIDENCE_B1_MAX, margin * 7 + unique_source_count * 3)
 
     # Bucket 2: gate adequacy — P4-F5: corrected multiplier from 30 → 25.
-    gate_max = settings.GATE_MAX_SCORE or 10
+    # Fix K-1: removed dead `or 10` fallback — GATE_MAX_SCORE is always set
+    # and validated in config.py; a zero GATE_MAX_SCORE would be a config bug
+    # that should raise, not silently substitute 10.
+    gate_max = settings.GATE_MAX_SCORE
     b2 = min(settings.CONFIDENCE_B2_MAX, int((gate_score / gate_max) * settings.CONFIDENCE_B2_MAX))
 
     # Bucket 3: structural quality
@@ -88,7 +91,10 @@ def compute_confidence(
     if session == MarketSession.MIDDAY_CHOP:
         # Defaults to 1.0 (no confirm) if missing on VEX/exception paths
         pcr_mod = direction_result.get("pcr_modifier", 1.0)
-        smart_penalty = getattr(settings, "SESSION_MIDDAY_SMART_PENALTY", False)
+        # Fix K-2: direct attribute access instead of getattr() with a default.
+        # If SESSION_MIDDAY_SMART_PENALTY is ever removed from config, this
+        # raises AttributeError immediately rather than silently falling back.
+        smart_penalty = settings.SESSION_MIDDAY_SMART_PENALTY
         if smart_penalty and b1 >= 35 and pcr_mod > 1.0:
             raw -= 5
             session_adjusted_reason = "MIDDAY_PENALTY_SMART"

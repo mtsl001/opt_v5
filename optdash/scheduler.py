@@ -380,12 +380,15 @@ def create_scheduler(
                 # re-enter on subsequent ticks.  Both functions are idempotent
                 # (filter ACCEPTED / is_closed=0 rows), so any unclosed
                 # positions will be swept by the next startup's gap fill.
-                eod_ok = True
+                # Fix Q-2: renamed eod_ok → eod_clean to clarify semantics:
+                # even when eod_clean=False (partial failure), done_flags is still
+                # set True below to prevent re-entry. The flag drives only logging.
+                eod_clean = True
 
                 try:
                     eod_force_close(duck, jconn, trade_date)
                 except Exception as eod_err:
-                    eod_ok = False
+                    eod_clean = False
                     logger.error(
                         "EOD force-close FAILED for {} -- open positions may remain. "
                         "Check journal on next startup.",
@@ -395,14 +398,14 @@ def create_scheduler(
                 try:
                     finalize_all_shadows(duck, jconn, trade_date)
                 except Exception as shadow_err:
-                    eod_ok = False
+                    eod_clean = False
                     logger.error(
                         "EOD finalize_shadows FAILED for {} -- shadows may remain open. "
                         "Will retry on next EOD run via get_all_unclosed_shadows().",
                         trade_date, exc_info=True,
                     )
 
-                if not eod_ok:
+                if not eod_clean:
                     logger.warning(
                         "EOD sweep for {} completed with errors -- done_flags set to "
                         "prevent re-entry. Manual review recommended.",

@@ -549,7 +549,10 @@ class Settings(BaseSettings):
     # -- Environment Gate
     GATE_GO_THRESHOLD:   int = 7
     GATE_WAIT_THRESHOLD: int = 5
-    GATE_MAX_SCORE:      int = 11
+    # Fix C-1: updated from 11 → 12 to accommodate +1 CONTANGO gate point.
+    # CONTANGO now earns +1 in environment.py condition C7 (was always 0 before).
+    # Recalibrate GATE_GO_THRESHOLD / GATE_WAIT_THRESHOLD if needed.
+    GATE_MAX_SCORE:      int = 12
 
     # -- Session Boundaries
     SESSION_OPENING_TURBULENCE_END: str = "09:30"
@@ -566,7 +569,11 @@ class Settings(BaseSettings):
     PREFLIGHT_MIN_CONFIDENCE:      int   = 50
     PREFLIGHT_MAX_THETA_RATIO:     float = 0.03
     PREFLIGHT_THETA_RATIO_DTE12:   float = 0.08
-    PREFLIGHT_MAX_PAIN_PROXIMITY:  float = 0.005
+    # Fix L-2: renamed from PREFLIGHT_MAX_PAIN_PROXIMITY (stored as fraction 0.005)
+    # to PREFLIGHT_MAX_PAIN_PROXIMITY_PCT (stored as %, matching ZGL_PROXIMITY_PCT
+    # convention). The old name + value required a * 100 in pre_flight.py that was
+    # easy to miss and inconsistent with the rest of the proximity constants.
+    PREFLIGHT_MAX_PAIN_PROXIMITY_PCT: float = 0.5   # 0.5% of spot
     PREFLIGHT_MIN_SSCORE:          float = 60.0
     PREFLIGHT_MIN_QUALITY_SCORE:   int   = 50
     PREFLIGHT_DTE1_MIN_GATE:       int   = 7
@@ -597,6 +604,14 @@ class Settings(BaseSettings):
             raise ValueError(f"AI_TARGET_MULT must be > 1.0, got {v}")
         return v
 
+    @field_validator("VOLUME_SPIKE_THRESHOLD")
+    @classmethod
+    def _check_volume_spike_threshold(cls, v: float) -> float:
+        # Fix I-1: a ratio below 1.0 is never a spike; guard against bad .env values.
+        if v <= 1.0:
+            raise ValueError(f"VOLUME_SPIKE_THRESHOLD must be > 1.0, got {v}")
+        return v
+
     TRAILING_STOP_ACTIVATION:   float = 0.20
     # Issue-2: trail-down percentage once trailing stop is activated.
     # 0.10 = trailing SL set at peak_ltp × (1 − 0.10) = peak × 0.90.
@@ -622,6 +637,15 @@ class Settings(BaseSettings):
     # Formula: b4 = min(CONFIDENCE_B4_MAX, int(win_rate * CONFIDENCE_B4_SCALE))
     CONFIDENCE_B4_MAX:   int = 10
     CONFIDENCE_B4_SCALE: int = 10
+
+    # Fix I-1: configurable volume spike threshold (was hardcoded 2.0 in microstructure.py).
+    # Must be > 1.0 (ratio below 1x is never a spike). Tune per deployment in .env.
+    VOLUME_SPIKE_THRESHOLD: float = 2.0
+
+    # Fix P-2: configurable DTE<=2 eff_ratio relaxation floor for screener.py.
+    # When DTE<=2, options with lower eff_ratio are acceptable due to wider
+    # spreads on near-expiry strikes.
+    SCREENER_EFF_RATIO_DTE2: float = 0.20
 
     SESSION_MIDDAY_SMART_PENALTY:      bool = True
     SESSION_MIDDAY_CONFIDENCE_PENALTY: int  = 10

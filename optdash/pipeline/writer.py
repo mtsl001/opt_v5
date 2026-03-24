@@ -162,6 +162,10 @@ PARQUET_SCHEMA = pa.schema([
     pa.field("cex",             pa.float64(), nullable=True),   # Charm Exposure
     pa.field("expiry_tier",     pa.string(),  nullable=True),
     pa.field("dte",             pa.int32(),   nullable=True),
+    # Fix O-1: avg_volume_20d pre-computed by BQ pipeline (rolling 20-day avg
+    # volume per strike).  Required by screener.py momentum factor.
+    # nullable=True: absent in older backfill data that predates the BQ column.
+    pa.field("avg_volume_20d",  pa.float64(), nullable=True),
     # REMOVED: s_score  -- computed live by screener.py, never stored in Parquet
     # REMOVED: rho      -- not available from Upstox API / BQ feed
 ])

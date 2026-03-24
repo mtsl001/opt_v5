@@ -1,13 +1,18 @@
 """Directional bias engine -- weighted signal voting.
 
-Signal weights:
+Signal weights (voting signals only):
   V_CoC velocity spike  -> weight 3  (strongest: order-flow momentum)
   Futures OBI           -> weight 2  (institutional positioning)
   VEX alignment         -> weight 2  (dealer mechanical flow)
   ATM OBI               -> weight 1  (options order imbalance)
-  PCR divergence        -> weight 1  (retail sentiment contra-indicator)
 
-Max CE/PE weight = 9 (all signals same direction).
+Max CE/PE weight = 8 (all 4 signals same direction; PCR is a post-vote
+margin multiplier — it modulates the final margin_adjusted, not a vote).
+
+# Fix J-3: corrected docstring — PCR divergence (old "Signal 5") is NOT added
+# to the `signals` list and does NOT contribute to unique_source_count or vote
+# weight. It is applied as `pcr_modifier` on margin_adjusted AFTER direction is
+# determined. Max vote weight is therefore 3+2+2+1=8, not 9 as previously stated.
 Ties (ce_weight == pe_weight) yield NEUTRAL -- no edge when signals cancel.
 
 Fix-G: get_directional_bias() now includes 'vex_data' in its return dict
@@ -229,7 +234,7 @@ def _vcoc_spike_age(
         """, [trade_date, underlying, snap_time, cutoff]).fetchall()
 
         if len(rows) < 2:
-            return False
+            return 0  # Fix J-1: was `return False`; function return type is int (0=no spike, N=age)
 
         coc_map    = {r[0]: (r[1] or 0.0) for r in rows}  # snap -> coc
         all_times  = [r[0] for r in rows]                  # ASC sorted
