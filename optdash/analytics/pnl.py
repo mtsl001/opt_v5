@@ -12,7 +12,10 @@ def compute_theta_sl(entry_premium: float, theta: float, minutes_elapsed: int) -
     Uses AI_SL_PCT from config (default 0.35 --> SL at 65% of adjusted entry).
     """
     sl_multiplier  = 1.0 - settings.AI_SL_PCT    # honours config -- not hardcoded
-    theta_per_min  = abs(theta or 0) / (6.5 * 60)
+    # Q-2: derive trading session length dynamically, same as compute_pnl_attribution.
+    # Avoids silent error when SEBI extends/shortens market hours or muhurat sessions.
+    TRADING_MINS   = _minutes_between("09:15", settings.SESSION_CLOSING_START) or 390
+    theta_per_min  = abs(theta or 0) / TRADING_MINS
     decay          = theta_per_min * minutes_elapsed
     adjusted_entry = max(0.01, entry_premium - decay)
     return round(adjusted_entry * sl_multiplier, 2)
