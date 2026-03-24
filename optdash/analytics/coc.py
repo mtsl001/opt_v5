@@ -258,7 +258,7 @@ def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = None, coc_f
     the None default is a safety net to raise AttributeError rather than silently
     produce a wrong signal when dte is omitted.
     """
-    if spot > 0 and dte > 0:
+    if spot > 0 and dte is not None and dte > 0:
         vcoc_pct = (vcoc / spot) * (365 / dte) * 100
         coc_pct  = (coc  / spot) * (365 / dte) * 100
         if vcoc_pct > settings.VCOC_BULL_THRESHOLD_PCT:

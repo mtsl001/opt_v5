@@ -549,10 +549,9 @@ class Settings(BaseSettings):
     # -- Environment Gate
     GATE_GO_THRESHOLD:   int = 7
     GATE_WAIT_THRESHOLD: int = 5
-    # Fix C-1: updated from 11 → 12 to accommodate +1 CONTANGO gate point.
-    # CONTANGO now earns +1 in environment.py condition C7 (was always 0 before).
-    # Recalibrate GATE_GO_THRESHOLD / GATE_WAIT_THRESHOLD if needed.
-    GATE_MAX_SCORE:      int = 12
+    # Fix C-1: Revert from 12 → 11. CONTANGO earns +1 but simply replaces an
+    # unreachable max, maintaining the real maximum of 11 points.
+    GATE_MAX_SCORE:      int = 11
 
     # -- Session Boundaries
     SESSION_OPENING_TURBULENCE_END: str = "09:30"
@@ -610,6 +609,14 @@ class Settings(BaseSettings):
         # Fix I-1: a ratio below 1.0 is never a spike; guard against bad .env values.
         if v <= 1.0:
             raise ValueError(f"VOLUME_SPIKE_THRESHOLD must be > 1.0, got {v}")
+        return v
+
+    @field_validator("CONFIDENCE_B4_SCALE")
+    @classmethod
+    def _check_b4_scale(cls, v: int, info) -> int:
+        b4_max = info.data.get("CONFIDENCE_B4_MAX", 10)
+        if v < b4_max:
+            raise ValueError(f"CONFIDENCE_B4_SCALE ({v}) must be >= CONFIDENCE_B4_MAX ({b4_max})")
         return v
 
     TRAILING_STOP_ACTIVATION:   float = 0.20

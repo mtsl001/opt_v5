@@ -175,8 +175,8 @@ def get_gex_series(conn: duckdb.DuckDBPyConnection, trade_date: str,
         for r in rows:
             gex         = r[1] or 0
             gex_n       = r[2] or 0
-            pct_of_peak = round(abs(gex)   / peak      * 100, 1) if peak      != 0 else 0.0
-            pct_near    = round(abs(gex_n) / peak_near * 100, 1) if peak_near != 0 else 0.0
+            pct_of_peak = round(abs(gex)   / peak      * 100, 1) if peak and peak > 0 else 0.0
+            pct_near    = round(abs(gex_n) / peak_near * 100, 1) if peak_near and peak_near > 0 else 0.0
             regime      = _classify_regime(gex,   pct_of_peak)
             regime_near = _classify_regime(gex_n, pct_near)
             result.append({
@@ -296,7 +296,7 @@ def _get_gex_peak(
     trade_date: str,
     underlying: str,
     near_only:  bool = False,
-) -> float:
+) -> float | None:
     """Day peak absolute GEX (denominator for pct_of_peak).
 
     GEX-4: checks the module-level _PEAK_CACHE before querying DuckDB.
