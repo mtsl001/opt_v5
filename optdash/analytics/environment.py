@@ -167,7 +167,7 @@ def get_environment_score(
                 c7_met   = True
                 c7_note  = "Shape = CONTANGO ✓ (+1)"
             elif ts == "BACKWARDATION":
-                c7_score = -1
+                c7_score = 1
                 c7_met   = True
                 c7_note  = "Shape = BACKWARDATION ⚠️ PENALTY -1"
             else:  # FLAT
@@ -246,7 +246,7 @@ def get_environment_score(
 
         bonus_score   = sum(c["points"] for c in conditions.values() if c["met"] and not c.get("is_penalty"))
         penalty_score = sum(c["points"] for c in conditions.values() if c["met"] and c.get("is_penalty"))
-        score = max(0, min(bonus_score + penalty_score, settings.GATE_MAX_SCORE))
+        score = max(0, min(bonus_score - penalty_score, settings.GATE_MAX_SCORE))
 
         _raw_max = sum(c["points"] for c in conditions.values() if c["met"] and not c.get("is_penalty"))
         # Fix C-2: use exact (c9_pts - 2) padding instead of magic +2 so a new

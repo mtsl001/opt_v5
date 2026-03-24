@@ -92,12 +92,9 @@ def get_directional_bias(
         # Issue #5: Cap combined V_CoC and Futures OBI weight at 4
         vcoc_fired = next((s for s in signals if "VCOC" in s["signal"]), None)
         fobi_fired = next((s for s in signals if "FUT_OBI" in s["signal"]), None)
-        if vcoc_fired and fobi_fired and vcoc_fired["direction"] == fobi_fired["direction"]:
-            fobi_fired["weight"] = 1  # cap combined to 3+1=4 instead of 3+2=5
-
-        # Count unique sources
         unique_source_count = len(signals)
         if vcoc_fired and fobi_fired and vcoc_fired["direction"] == fobi_fired["direction"]:
+            fobi_fired["weight"] = 1  # cap combined to 3+1=4 instead of 3+2=5
             unique_source_count -= 1
 
         ce_weight = sum(s["weight"] for s in signals if s["direction"] == Direction.CE.value)

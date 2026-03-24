@@ -130,8 +130,8 @@ def get_net_gex(
             "gex_all_B":        round(gex_all,  3),
             "gex_near_B":       round(gex_near, 3),
             "gex_far_B":        round(gex_far,  3),
-            "pct_of_peak":      round(pct,      1),
-            "pct_near_of_peak": round(pct_near, 1),
+            "pct_of_peak":      round(pct,      1) if pct is not None else None,
+            "pct_near_of_peak": round(pct_near, 1) if pct_near is not None else None,
             "regime":           regime.value,
             "regime_near":      regime_near.value,   # GEX-3: primary gate signal
             "spot":             spot,

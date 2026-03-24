@@ -237,7 +237,7 @@ def generate_recommendation(
     iv_base   = settings.AI_SL_IV_BASE.get(underlying, 25.0)
     iv_entry  = strike.get("iv") or iv_base
     iv_sl_adj = max(0.20, min(0.45, settings.AI_SL_PCT + (iv_entry - iv_base) * settings.AI_SL_IV_STEP))
-    iv_tgt_adj = max(settings.AI_TARGET_MULT, 1.0 + iv_sl_adj * settings.AI_MIN_RR_RATIO)
+    iv_tgt_adj = settings.AI_TARGET_MULT
     sl     = round(entry_premium * (1 - iv_sl_adj), 2)
     target = round(entry_premium * iv_tgt_adj, 2)
 
@@ -361,6 +361,6 @@ def _nearest_expiry(
         SELECT MIN(expiry_date) FROM options_data
         WHERE trade_date=? AND snap_time=? AND underlying=?
           AND expiry_tier='TIER1'
-          AND expiry_date >= ?
+          AND CAST(expiry_date AS DATE) >= CAST(? AS DATE)
     """, [trade_date, snap_time, underlying, trade_date]).fetchone()
     return row[0] if row else None

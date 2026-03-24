@@ -126,13 +126,13 @@ def get_ivr_ivp(
                         trade_date,
                         LN(
                             LAST(spot ORDER BY snap_time) /
-                            LAG(LAST(spot ORDER BY snap_time)) OVER (ORDER BY trade_date)
+                            LAG(LAST(spot ORDER BY snap_time)) OVER (ORDER BY trade_date ASC)
                         ) AS daily_ret
                     FROM options_data
                     WHERE underlying=? AND trade_date <= ?
                     GROUP BY trade_date
-                    ORDER BY trade_date DESC
                 ) all_rets
+                ORDER BY trade_date DESC
                 LIMIT 22
             )
         """, [underlying, trade_date]).fetchone()

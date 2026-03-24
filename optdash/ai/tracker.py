@@ -58,6 +58,7 @@ def track_open_positions(
         entry   = _actual if _actual is not None else trade["entry_premium"]
         lot   = settings.LOT_SIZES.get(underlying, 1)
         # Fix-K (F-01): pnl_abs is monetary (point_diff * lot); pnl_pct stays per-unit %
+        # Pass 4 Bug 5: final_pnl_abs cannot be compared across underlyings without lot normalization.
         pnl_abs = round((ltp - entry) * lot, 2)
         pnl_pct = round((ltp - entry) / entry * 100, 2) if entry else 0.0
 
@@ -206,9 +207,9 @@ def track_open_positions(
             )
         elif ltp >= trade["target_price"]:
             exit_reason = ExitReason.TARGET_HIT.value
-        elif gate_no_go and _consecutive_no_go_count(
+        elif gate_no_go and (_consecutive_no_go_count(
             jconn, trade["id"]
-        ) >= settings.GATE_SUSTAINED_NO_GO_SNAPS:
+        ) + 1) >= settings.GATE_SUSTAINED_NO_GO_SNAPS:
             exit_reason = ExitReason.GATE_NO_GO.value
         elif iv_crush == IVCrushSeverity.HIGH.value and pnl_pct < -15:
             exit_reason = ExitReason.IV_CRUSH.value
