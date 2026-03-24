@@ -74,10 +74,16 @@ def get_coc_latest(conn: duckdb.DuckDBPyConnection, trade_date: str,
         return {}
 
 
-def get_coc_series(conn: duckdb.DuckDBPyConnection, trade_date: str, underlying: str) -> list[dict]:
+def get_coc_series(conn: duckdb.DuckDBPyConnection, trade_date: str, underlying: str, since_snap: str = None) -> list[dict]:
     """Full-day CoC + V_CoC series for charting."""
     try:
-        rows = conn.execute("""
+        params = [trade_date, underlying]
+        snap_clause = ""
+        if since_snap:
+            snap_clause = " AND snap_time >= ?"
+            params.append(since_snap)
+
+        rows = conn.execute(f"""
             SELECT
                 snap_time,
                 AVG(fut_price) - AVG(spot) AS coc,
@@ -85,9 +91,9 @@ def get_coc_series(conn: duckdb.DuckDBPyConnection, trade_date: str, underlying:
                 AVG(fut_price)             AS fut_price,
                 AVG(CASE WHEN dte > 0 THEN dte END) AS dte
             FROM options_data
-            WHERE trade_date=? AND underlying=? AND instrument_type='FUT'
+            WHERE trade_date=? AND underlying=? AND instrument_type='FUT'{snap_clause}
             GROUP BY snap_time ORDER BY snap_time
-        """, [trade_date, underlying]).fetchall()
+        """, params).fetchall()
         if not rows:
             return []
         result = []   # Bug-1 fix: result must be initialised before the loop
@@ -258,9 +264,10 @@ def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = None, coc_f
     the None default is a safety net to raise AttributeError rather than silently
     produce a wrong signal when dte is omitted.
     """
-    if spot > 0 and dte is not None and dte > 0:
-        vcoc_pct = (vcoc / spot) * (365 / dte) * 100
-        coc_pct  = (coc  / spot) * (365 / dte) * 100
+    if spot > 0 and dte is not None:
+        safe_dte = max(1, dte)
+        vcoc_pct = (vcoc / spot) * (365 / safe_dte) * 100
+        coc_pct  = (coc  / spot) * (365 / safe_dte) * 100
         if vcoc_pct > settings.VCOC_BULL_THRESHOLD_PCT:
             return "VELOCITY_BULL"
         if vcoc_pct < settings.VCOC_BEAR_THRESHOLD_PCT:

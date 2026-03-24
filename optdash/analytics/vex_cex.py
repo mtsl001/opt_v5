@@ -78,9 +78,10 @@ def get_vex_cex_current(conn: duckdb.DuckDBPyConnection, trade_date: str,
 def get_vex_cex_full(conn: duckdb.DuckDBPyConnection, trade_date: str,
                      snap_time: str, underlying: str) -> dict:
     """Full series + by-strike breakdown."""
+    gex_data  = get_net_gex(conn, trade_date, snap_time, underlying)
     series    = _get_vex_cex_series(conn, trade_date, underlying)
     by_strike = _get_by_strike(conn, trade_date, snap_time, underlying)
-    current   = get_vex_cex_current(conn, trade_date, snap_time, underlying)
+    current   = get_vex_cex_current(conn, trade_date, snap_time, underlying, gex_data=gex_data)
     return {
         "series": series, "by_strike": by_strike,
         "current": current if current else None,

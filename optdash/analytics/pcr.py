@@ -92,6 +92,7 @@ def get_pcr_series(
     conn:       duckdb.DuckDBPyConnection,
     trade_date: str,
     underlying: str,
+    since_snap: str = None,
 ) -> list[dict]:
     """Full-day PCR series with per-snap 3-period smoothed OBI.
 
@@ -102,6 +103,12 @@ def get_pcr_series(
         w_z = settings.PCR_ZSCORE_WINDOW - 1
         w_t = settings.PCR_TREND_SNAPS
         w_obi = settings.PCR_OBI_SMOOTH_SNAPS - 1
+        params = [trade_date, underlying]
+        snap_clause = ""
+        if since_snap:
+            snap_clause = " AND snap_time >= ?"
+            params.append(since_snap)
+
         rows = conn.execute(f"""
             SELECT
                 snap_time,
@@ -158,11 +165,11 @@ def get_pcr_series(
                      SUM(CASE WHEN expiry_tier='TIER2' THEN COALESCE(ask1_qty,0) ELSE 0 END)) /
                     NULLIF(SUM(CASE WHEN expiry_tier='TIER2' THEN COALESCE(bid1_qty,0)+COALESCE(ask1_qty,0) ELSE 0 END), 0) AS obi_t2
                 FROM options_data
-                WHERE trade_date=? AND underlying=? AND expiry_tier IN ('TIER1', 'TIER2')
+                WHERE trade_date=? AND underlying=? AND expiry_tier IN ('TIER1', 'TIER2'){snap_clause}
                 GROUP BY snap_time
             ) sub
             ORDER BY snap_time
-        """, [trade_date, underlying]).fetchall()
+        """, params).fetchall()
 
         result = []
         for i, r in enumerate(rows):
@@ -254,7 +261,12 @@ def _smoothed_obi(
 
 
 def _trailing_pcr_metrics(conn: duckdb.DuckDBPyConnection, trade_date: str, snap_time: str, underlying: str, tier: str = "TIER1") -> dict:
-    """Compute rolling Z-score parameters and divergence trend for the latest snapshot."""
+    """Compute rolling Z-score parameters and divergence trend for the latest snapshot.
+    
+    Note: Fetches max(ZSCORE_WINDOW, TREND_SNAPS + 1) rows. If TREND_SNAPS is greater than
+    ZSCORE_WINDOW, the divs list will be truncated to ZSCORE_WINDOW for standard calculations,
+    while lag_idx safely evaluates against the capped length, falling back to None if unavailable.
+    """
     try:
         limit_rows = max(settings.PCR_ZSCORE_WINDOW, settings.PCR_TREND_SNAPS + 1)
         rows = conn.execute("""

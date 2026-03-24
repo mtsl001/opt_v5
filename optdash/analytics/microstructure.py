@@ -6,7 +6,7 @@ from optdash.config import settings
 
 
 def get_volume_velocity(conn: duckdb.DuckDBPyConnection, trade_date: str,
-                        underlying: str) -> list[dict]:
+                        underlying: str, since_snap: str = None) -> list[dict]:
     """Full-day volume ratio vs rolling 10-snap median baseline.
 
     Index 0 (09:15 opening-auction snap) is excluded from all rolling
@@ -15,12 +15,18 @@ def get_volume_velocity(conn: duckdb.DuckDBPyConnection, trade_date: str,
     the first ~50 minutes of the session if left in the window.
     """
     try:
-        rows = conn.execute("""
+        params = [trade_date, underlying]
+        snap_clause = ""
+        if since_snap:
+            snap_clause = " AND snap_time >= ?"
+            params.append(since_snap)
+
+        rows = conn.execute(f"""
             SELECT snap_time, SUM(volume) AS vol_total
             FROM options_data
-            WHERE trade_date=? AND underlying=?
+            WHERE trade_date=? AND underlying=?{snap_clause}
             GROUP BY snap_time ORDER BY snap_time
-        """, [trade_date, underlying]).fetchall()
+        """, params).fetchall()
         if not rows:
             return []
         result = []
@@ -38,7 +44,12 @@ def get_volume_velocity(conn: duckdb.DuckDBPyConnection, trade_date: str,
                 # excluded even for i=1..window_snaps when the window would otherwise
                 # reach back to index 0.
                 window   = vols[max(1, i - settings.VOLUME_VELOCITY_BASELINE_SNAPS):i]
-                baseline = sorted(window)[len(window) // 2] if window else vols[i]
+                if not window:
+                    baseline = vols[i]
+                else:
+                    sw = sorted(window)
+                    n = len(sw)
+                    baseline = (sw[n//2 - 1] + sw[n//2]) / 2.0 if n % 2 == 0 else sw[n//2]
                 ratio    = (vols[i] / baseline) if baseline else 1.0
             result.append({
                 "snap_time":    r[0],

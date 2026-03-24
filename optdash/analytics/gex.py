@@ -145,7 +145,7 @@ def get_net_gex(
 
 
 def get_gex_series(conn: duckdb.DuckDBPyConnection, trade_date: str,
-                   underlying: str) -> list[dict]:
+                   underlying: str, since_snap: str = None) -> list[dict]:
     """Full-day GEX series with pct_of_peak for charting.
 
     GEX-5: pct_of_peak now uses _get_gex_peak() (same DuckDB source as
@@ -153,17 +153,22 @@ def get_gex_series(conn: duckdb.DuckDBPyConnection, trade_date: str,
     and chart pct_of_peak now share a single denominator.
     """
     try:
-        rows = conn.execute("""
+        params = [settings.GEX_SCALING, settings.GEX_SCALING, settings.GEX_SCALING, trade_date, underlying]
+        snap_clause = ""
+        if since_snap:
+            snap_clause = " AND snap_time >= ?"
+            params.append(since_snap)
+
+        rows = conn.execute(f"""
             SELECT
                 snap_time,
                 SUM(gex) / ?                                                              AS gex_all_B,
                 SUM(CASE WHEN expiry_tier IN ('TIER1','TIER2') THEN gex ELSE 0 END) / ?  AS gex_near_B,
                 SUM(CASE WHEN expiry_tier = 'TIER3'            THEN gex ELSE 0 END) / ?  AS gex_far_B
             FROM options_data
-            WHERE trade_date = ? AND underlying = ?
+            WHERE trade_date = ? AND underlying = ?{snap_clause}
             GROUP BY snap_time ORDER BY snap_time
-        """, [settings.GEX_SCALING, settings.GEX_SCALING, settings.GEX_SCALING,
-               trade_date, underlying]).fetchall()
+        """, params).fetchall()
         if not rows:
             return []
 

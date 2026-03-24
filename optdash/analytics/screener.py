@@ -41,9 +41,13 @@ def get_strikes(
       separate params list entry to avoid DuckDB nullable-param quirks.
     """
     try:
-        # Fix-J: build optional direction filter in Python rather than
-        # relying on (? IS NULL OR ...) to sidestep DuckDB NULL param issues.
+        if direction not in (None, "CE", "PE"):
+            raise ValueError(f"Invalid direction: {direction!r}")
         direction_clause = "AND o.option_type = ?" if direction else ""
+        
+        # User Fix 2: Prevent delta division by zero downstream if config is collapsed
+        if settings.SCREENER_MAX_DELTA == settings.SCREENER_MIN_DELTA:
+            raise ValueError("SCREENER_MAX_DELTA must be strictly > SCREENER_MIN_DELTA")
 
         # Fetch IVP for Issue #4 to gate the IV penalty
         iv_data = get_ivr_ivp(conn, trade_date, snap_time, underlying)
@@ -83,7 +87,7 @@ def get_strikes(
                     ABS(o.theta) / NULLIF(ABS(o.delta), 0)                 AS eff_ratio,
                     (
                         -- 1. Delta: directional sensitivity (normalized)
-                        ? * (ABS(o.delta) - ?) / (? - ?)
+                        ? * (ABS(o.delta) - ?) / NULLIF(? - ?, 0)
                         -- 2. Liquidity (capped per underlying) with bid-ask spread penalty
                       + ? * LEAST(1.0, o.oi * o.ltp / 1e7 / ?)
                           * (1.0 - LEAST(1.0, COALESCE(o.ask1_price - o.bid1_price, 0) / NULLIF(o.ltp * 0.05, 0)))
@@ -161,5 +165,6 @@ def get_strikes(
 
         return rows_out
     except Exception as e:
+        record_error("get_strikes")
         logger.warning("get_strikes internal error: {}", e, exc_info=True)
-        raise
+        return []

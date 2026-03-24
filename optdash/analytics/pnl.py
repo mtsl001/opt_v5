@@ -106,7 +106,12 @@ def compute_theta_clock(
     if status not in ("IN_TRADE", "ACCEPTED"):
         return {"hours_remaining": None, "is_urgent": False}
 
-    _MARKET_CLOSE_MIN = 15 * 60 + 30          # 15:30 in minutes
+    close_str = getattr(settings, 'SESSION_CLOSING_START', '15:30')
+    try:
+        h, m = map(int, close_str.split(':'))
+        _MARKET_CLOSE_MIN = h * 60 + m
+    except Exception:
+        _MARKET_CLOSE_MIN = 15 * 60 + 30          # 15:30 in minutes fallback
     snap_min          = _snap_to_min(snap_time)
     remaining_min     = max(30, _MARKET_CLOSE_MIN - snap_min)  # floor: 30 min
 

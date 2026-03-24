@@ -108,6 +108,7 @@ def compute_confidence(
 
     confidence = max(0, min(100, raw))
 
+    is_adjusted = raw != raw_pre_session
     return {
         "confidence": confidence,
         "buckets": {
@@ -116,7 +117,7 @@ def compute_confidence(
             "structural":       b3,
             "historical":       b4,
         },
-        "session_adjusted": raw != raw_pre_session,
-        "session_adjusted_reason": session_adjusted_reason,
+        "session_adjusted": is_adjusted,
+        "session_adjusted_reason": session_adjusted_reason if is_adjusted else None,
         "cold_start":       cold_start,
     }

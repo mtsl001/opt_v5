@@ -101,10 +101,18 @@ def get_alerts(
     alerts = []
 
     try:
-        gex_series = get_gex_series(conn, trade_date, underlying)
-        coc_series = get_coc_series(conn, trade_date, underlying)
-        pcr_series = get_pcr_series(conn, trade_date, underlying)
-        vol_series = get_volume_velocity(conn, trade_date, underlying)
+        try:
+            # Bug 18: Restrict database queries to the active trailing window instead of 09:15
+            h, m = map(int, snap_time[:5].split(':'))
+            total_m = max(0, h * 60 + m - (lookback_snaps + 5))
+            since_snap = f"{total_m // 60:02d}:{total_m % 60:02d}"
+        except Exception:
+            since_snap = None
+
+        gex_series = get_gex_series(conn, trade_date, underlying, since_snap=since_snap)
+        coc_series = get_coc_series(conn, trade_date, underlying, since_snap=since_snap)
+        pcr_series = get_pcr_series(conn, trade_date, underlying, since_snap=since_snap)
+        vol_series = get_volume_velocity(conn, trade_date, underlying, since_snap=since_snap)
 
         def recent(series):
             filtered = [s for s in series if s["snap_time"] <= snap_time]
@@ -239,7 +247,8 @@ def get_alerts(
     seen = set()
     unique = []
     for a in sorted(alerts, key=lambda x: x["time"], reverse=True):
-        k = (a["type"], a["time"])
+        # Pass 5 Bug 19: Only dedup on alert type so same-type alerts don't spam per session
+        k = a["type"]
         if k not in seen:
             seen.add(k)
             unique.append(a)
