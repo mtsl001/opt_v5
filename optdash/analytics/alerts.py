@@ -141,10 +141,13 @@ def get_alerts(
 
     try:
         try:
-            # Bug 18: Restrict database queries to the active trailing window instead of 09:15
+            # Bug 18: Restrict database queries to the active trailing window instead of 09:15.
+            # Issue-J: clamp since_snap floor to "09:15" (market open) so pre-market
+            # timestamps (e.g. "08:58" at session open) are never passed to DuckDB.
             h, m = map(int, snap_time[:5].split(':'))
             total_m = max(0, h * 60 + m - (lookback_snaps + 5))
-            since_snap = f"{total_m // 60:02d}:{total_m % 60:02d}"
+            since_snap_raw = f"{total_m // 60:02d}:{total_m % 60:02d}"
+            since_snap = max(since_snap_raw, "09:15")  # clamp to market open
         except Exception:
             since_snap = None
 
@@ -268,18 +271,23 @@ def get_alerts(
         gex_current = get_net_gex(conn, trade_date, snap_time, underlying)
         spot = gex_current.get("spot")
 
-        # Derive previous-snap gex for ZGL transition guard (Issue-5).
-        # prev_snap_time is the last entry before snap_time in gex_w (already fetched).
+        # Derive previous-snap data for ZGL + SkewVEX transition guards (Issue-5).
+        # Use gex_w[-2] snap_time (already in memory) to avoid an extra time-lookup query.
+        # Issue-I: batch prev-snap fetches: gex shares the snap_time key;
+        # skew and vex are fetched only when a prev snap exists, sharing the same key.
         prev_gex_snap = gex_w[-2]["snap_time"] if len(gex_w) >= 2 else None
-        prev_gex_data = get_net_gex(conn, trade_date, prev_gex_snap, underlying) if prev_gex_snap else None
+        if prev_gex_snap:
+            prev_gex_data  = get_net_gex(conn, trade_date, prev_gex_snap, underlying)
+            prev_skew_data = get_iv_skew(conn, trade_date, prev_gex_snap, underlying)
+            # Pass prev_gex_data as gex_data to avoid a redundant get_net_gex inside vex_cex
+            prev_vex_data  = get_vex_cex_current(conn, trade_date, prev_gex_snap, underlying,
+                                                  gex_data=prev_gex_data)
+        else:
+            prev_gex_data = prev_skew_data = prev_vex_data = None
 
         # Skew x VEX convergence (B-2)
         skew_data = get_iv_skew(conn, trade_date, snap_time, underlying)
         vex_data  = get_vex_cex_current(conn, trade_date, snap_time, underlying, gex_data=gex_current)
-
-        # Derive previous-snap skew/vex for HIGH_CONVICTION_BEAR transition guard (Issue-5).
-        prev_skew_data = get_iv_skew(conn, trade_date, prev_gex_snap, underlying) if prev_gex_snap else None
-        prev_vex_data  = get_vex_cex_current(conn, trade_date, prev_gex_snap, underlying) if prev_gex_snap else None
 
         skew_vex_alert = _check_skew_vex_convergence(
             skew_data, vex_data, underlying, snap_time,

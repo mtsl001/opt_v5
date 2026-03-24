@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS trades (
     exit_premium        REAL,
     exit_snap_time      TEXT,
     exit_reason         TEXT,               -- ExitReason enum value
+    -- Bug-5: final_pnl_abs is monetary PnL = (exit - entry) * lot_size.
+    -- It is lot-normalised per-trade and correct within a single underlying.
+    -- WARNING: Do NOT SUM or AVG this column across different underlyings without
+    -- normalising to a common unit (e.g. per-lot or per-crore notional), because
+    -- lot sizes differ: NIFTY=25, BANKNIFTY=15, FINNIFTY=40, etc.
+    -- Use final_pnl_pct for cross-underlying performance comparisons.
     final_pnl_abs       REAL,
     final_pnl_pct       REAL,
     confidence          INTEGER NOT NULL,
