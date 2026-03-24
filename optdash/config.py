@@ -299,7 +299,14 @@ class Settings(BaseSettings):
         "theta",
         "gamma",
         "vega",
+        "avg_volume_20d",
     ]
+
+    # -- Microstructure
+    VOLUME_VELOCITY_BASELINE_SNAPS: int = 30
+
+    # -- Alerts
+    ALERT_OPENING_SUPPRESS_END: str = "09:25"
 
     # -- GEX
     GEX_NEAR_WEEKS:        int   = 2

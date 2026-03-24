@@ -2,6 +2,7 @@
 import duckdb
 from loguru import logger
 from optdash.metrics import record_error
+from optdash.config import settings
 
 
 def get_volume_velocity(conn: duckdb.DuckDBPyConnection, trade_date: str,
@@ -32,11 +33,11 @@ def get_volume_velocity(conn: duckdb.DuckDBPyConnection, trade_date: str,
                 ratio    = 1.0
                 baseline = vols[i]
             else:
-                # Rolling 10-snap median window starting at index 1 (never 0).
-                # max(1, i-10) ensures the opening-auction snap is permanently
-                # excluded even for i=1..10 when the window would otherwise
+                # Rolling median window starting at index 1 (never 0).
+                # max(1, i - window_snaps) ensures the opening-auction snap is permanently
+                # excluded even for i=1..window_snaps when the window would otherwise
                 # reach back to index 0.
-                window   = vols[max(1, i - 10):i]
+                window   = vols[max(1, i - settings.VOLUME_VELOCITY_BASELINE_SNAPS):i]
                 baseline = sorted(window)[len(window) // 2] if window else vols[i]
                 ratio    = (vols[i] / baseline) if baseline else 1.0
             result.append({

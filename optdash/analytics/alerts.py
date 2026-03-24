@@ -133,24 +133,20 @@ def get_alerts(
             prev_coc = coc_w[-2]
             if (cur_coc["signal"]  in _velocity_signals and
                     prev_coc["signal"] not in _velocity_signals):
-                vcoc = cur_coc.get("v_coc_15m", 0)
-                dir_ = "CE" if vcoc > 0 else "PE"
-                alerts.append(_make_alert(
-                    time=cur_coc["snap_time"],
-                    type_=AlertType.COC_VELOCITY,
-                    severity=AlertSeverity.HIGH,
-                    direction=dir_,
-                    headline=f"V_CoC velocity spike: {vcoc:+.1f}",
-                    message=f"Cost-of-carry velocity {vcoc:+.1f} indicates "
-                            f"{'institutional long accumulation' if vcoc > 0 else 'institutional unwinding'}.",
-                ))
+                if cur_coc["snap_time"] > settings.ALERT_OPENING_SUPPRESS_END:
+                    vcoc = cur_coc.get("v_coc_15m", 0)
+                    dir_ = "CE" if vcoc > 0 else "PE"
+                    alerts.append(_make_alert(
+                        time=cur_coc["snap_time"],
+                        type_=AlertType.COC_VELOCITY,
+                        severity=AlertSeverity.HIGH,
+                        direction=dir_,
+                        headline=f"V_CoC velocity spike: {vcoc:+.1f}",
+                        message=f"Cost-of-carry velocity {vcoc:+.1f} indicates "
+                                f"{'institutional long accumulation' if vcoc > 0 else 'institutional unwinding'}.",
+                    ))
         elif len(coc_w) == 1 and coc_w[0]["signal"] in _velocity_signals:
-            # Issue-R6: suppress single-snap V_CoC alert at 09:15 (opening auction).
-            # The opening snap frequently carries an anomalous V_CoC from the
-            # overnight settlement gap, producing a false HIGH alert on the first
-            # tick of every trading day.  Suppressing only 09:15 preserves the
-            # single-snap path for genuine early-session velocity spikes at 09:20+.
-            if coc_w[0]["snap_time"] != "09:15":
+            if coc_w[0]["snap_time"] > settings.ALERT_OPENING_SUPPRESS_END:
                 vcoc = coc_w[0].get("v_coc_15m", 0)
                 dir_ = "CE" if vcoc > 0 else "PE"
                 alerts.append(_make_alert(
@@ -193,27 +189,29 @@ def get_alerts(
             cur_vol  = vol_w[-1]
             prev_vol = vol_w[-2]
             if cur_vol["signal"] == "SPIKE" and prev_vol["signal"] != "SPIKE":
-                ratio = cur_vol["volume_ratio"]
+                if cur_vol["snap_time"] > settings.ALERT_OPENING_SUPPRESS_END:
+                    ratio = cur_vol["volume_ratio"]
+                    sev   = AlertSeverity.HIGH if ratio >= 3.0 else AlertSeverity.MEDIUM
+                    alerts.append(_make_alert(
+                        time=cur_vol["snap_time"],
+                        type_=AlertType.VOLUME_SPIKE,
+                        severity=sev,
+                        direction=None,
+                        headline=f"Volume spike: {ratio:.1f}x baseline",
+                        message=f"Current volume {ratio:.1f}x above rolling median -- unusual activity detected.",
+                    ))
+        elif len(vol_w) == 1 and vol_w[0]["signal"] == "SPIKE":
+            if vol_w[0]["snap_time"] > settings.ALERT_OPENING_SUPPRESS_END:
+                ratio = vol_w[0]["volume_ratio"]
                 sev   = AlertSeverity.HIGH if ratio >= 3.0 else AlertSeverity.MEDIUM
                 alerts.append(_make_alert(
-                    time=cur_vol["snap_time"],
+                    time=vol_w[0]["snap_time"],
                     type_=AlertType.VOLUME_SPIKE,
                     severity=sev,
                     direction=None,
                     headline=f"Volume spike: {ratio:.1f}x baseline",
                     message=f"Current volume {ratio:.1f}x above rolling median -- unusual activity detected.",
                 ))
-        elif len(vol_w) == 1 and vol_w[0]["signal"] == "SPIKE":
-            ratio = vol_w[0]["volume_ratio"]
-            sev   = AlertSeverity.HIGH if ratio >= 3.0 else AlertSeverity.MEDIUM
-            alerts.append(_make_alert(
-                time=vol_w[0]["snap_time"],
-                type_=AlertType.VOLUME_SPIKE,
-                severity=sev,
-                direction=None,
-                headline=f"Volume spike: {ratio:.1f}x baseline",
-                message=f"Current volume {ratio:.1f}x above rolling median -- unusual activity detected.",
-            ))
 
         # Skew x VEX convergence (B-2)
         skew_data = get_iv_skew(conn, trade_date, snap_time, underlying)
