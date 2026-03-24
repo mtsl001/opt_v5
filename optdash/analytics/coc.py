@@ -264,6 +264,9 @@ def _coc_signal(coc: float, vcoc: float, spot: float = 0, dte: int = None, coc_f
     the None default is a safety net to raise AttributeError rather than silently
     produce a wrong signal when dte is omitted.
     """
+    if not (spot > 0 and dte is not None):
+        logger.warning("_coc_signal fallback path: spot={} dte={} — using absolute thresholds", spot, dte)
+        
     if spot > 0 and dte is not None:
         safe_dte = max(1, dte)
         vcoc_pct = (vcoc / spot) * (365 / safe_dte) * 100

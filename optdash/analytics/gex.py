@@ -340,7 +340,8 @@ def _get_gex_peak(
             """, [settings.GEX_SCALING, trade_date, underlying]).fetchone()
 
         result = float(row[0]) if row and row[0] else 0.0
-        _PEAK_CACHE[cache_key] = result
+        if result > 0:
+            _PEAK_CACHE[cache_key] = result
         return result
     except Exception as e:
         # Fix D-1: log the failure so DuckDB errors are visible in monitoring.

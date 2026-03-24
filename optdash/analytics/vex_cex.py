@@ -106,7 +106,7 @@ def _get_vex_cex_series(conn, trade_date, underlying) -> list[dict]:
                 -- direction always wrong across the full day series.
                 SUM(gex) / ? AS gex_all_B
             FROM options_data
-            WHERE trade_date=? AND underlying=? AND expiry_tier='TIER1'
+            WHERE trade_date=? AND underlying=? AND expiry_tier IN ('TIER1', 'TIER2')
             GROUP BY snap_time ORDER BY snap_time
         """, [settings.GEX_SCALING, trade_date, underlying]).fetchall()
         result = []

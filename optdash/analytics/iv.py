@@ -154,6 +154,7 @@ def get_ivr_ivp(
             else "UNKNOWN"
         )
 
+        ts_data = get_term_structure(conn, trade_date, snap_time, underlying)
         return {
             "atm_iv":       round(atm_iv, 2),
             "ivr":          ivr,
@@ -167,9 +168,7 @@ def get_ivr_ivp(
             "vrp_regime":   vrp_regime,
             "india_vix":    round(india_vix, 2) if india_vix is not None else None,
             "vix_regime":   vix_regime,
-            "shape":        get_term_structure(
-                                conn, trade_date, snap_time, underlying
-                            ).get("shape", "FLAT"),
+            "shape":        ts_data.get("shape", "FLAT"),
         }
     except Exception as e:
         record_error("get_ivr_ivp")

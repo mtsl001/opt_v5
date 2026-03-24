@@ -165,7 +165,7 @@ def get_pcr_series(
                      SUM(CASE WHEN expiry_tier='TIER2' THEN COALESCE(ask1_qty,0) ELSE 0 END)) /
                     NULLIF(SUM(CASE WHEN expiry_tier='TIER2' THEN COALESCE(bid1_qty,0)+COALESCE(ask1_qty,0) ELSE 0 END), 0) AS obi_t2
                 FROM options_data
-                WHERE trade_date=? AND underlying=? AND expiry_tier IN ('TIER1', 'TIER2'){snap_clause}
+                WHERE trade_date=? AND underlying=? AND instrument_type='OPT' AND expiry_tier IN ('TIER1', 'TIER2'){snap_clause}
                 GROUP BY snap_time
             ) sub
             ORDER BY snap_time

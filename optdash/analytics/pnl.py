@@ -49,7 +49,9 @@ def compute_pnl_attribution(
         delta_pnl = round(delta * spot_chg, 2)
         gamma_pnl = round(0.5 * gamma * spot_chg ** 2, 2)
         vega_pnl  = round(vega * iv_chg, 2)
-        theta_pnl = round(theta / (6.5 * 60) * minutes, 2)
+        
+        TRADING_MINS = _minutes_between("09:15", settings.SESSION_CLOSING_START)
+        theta_pnl = round(theta / TRADING_MINS * minutes, 2)
 
         # Warn when theta linearity assumption is most strained.
         if minutes > 120 and (entry.get("dte") or 99) <= 3:

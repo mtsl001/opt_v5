@@ -167,7 +167,7 @@ def get_environment_score(
                 c7_met   = True
                 c7_note  = "Shape = CONTANGO ✓ (+1)"
             elif ts == "BACKWARDATION":
-                c7_score = 1
+                c7_score = -1
                 c7_met   = True
                 c7_note  = "Shape = BACKWARDATION ⚠️ PENALTY -1"
             else:  # FLAT
@@ -245,7 +245,7 @@ def get_environment_score(
         )
 
         bonus_score   = sum(c["points"] for c in conditions.values() if c["met"] and not c.get("is_penalty"))
-        penalty_score = sum(c["points"] for c in conditions.values() if c["met"] and c.get("is_penalty"))
+        penalty_score = sum(abs(c["points"]) for c in conditions.values() if c["met"] and c.get("is_penalty"))
         score = max(0, min(bonus_score - penalty_score, settings.GATE_MAX_SCORE))
 
         _raw_max = sum(c["points"] for c in conditions.values() if c["met"] and not c.get("is_penalty"))
@@ -261,7 +261,8 @@ def get_environment_score(
                 "Update GATE_MAX_SCORE and re-calibrate thresholds in config.py."
             )
 
-        vol_data = get_volume_velocity(conn, trade_date, underlying)
+        # L: Pass since_snap to stop full-day scan on every gate tick
+        vol_data = get_volume_velocity(conn, trade_date, underlying, since_snap=snap_time)
         if vol_data:
             last_vol = vol_data[-1]
             snap_vol = last_vol["vol_total"]
