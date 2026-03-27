@@ -4,9 +4,9 @@ Each 1-minute scheduler tick calls write_snap() for every underlying.
 Because Parquet does not support native append, the writer uses a
 read-merge-rewrite pattern:
 
-  1. If a file already exists for today's underlying, load it.
-  2. Drop any existing rows for ALL incoming snap_times (idempotent re-runs).
-  3. Concat the new rows, sort by snap_time, write back atomically.
+1. If a file already exists for today's underlying, load it.
+2. Drop any existing rows for ALL incoming snap_times (idempotent re-runs).
+3. Concat the new rows, sort by snap_time, write back atomically.
 
 Atomicity
 ---------
@@ -17,32 +17,32 @@ complete file or the new complete file -- never a partial write.
 Concurrency
 -----------
 filelock.FileLock serialises concurrent read-merge-write access on a
-``.lock`` sibling.  This guards against scheduler-restart overlaps where
+``.lock`` sibling. This guards against scheduler-restart overlaps where
 two writer instances could otherwise race on the same file.
 
 File layout
 -----------
-  data/processed/trade_date=YYYY-MM-DD/
-      NIFTY.parquet
-      BANKNIFTY.parquet
-      FINNIFTY.parquet
-      ...
+data/processed/trade_date=YYYY-MM-DD/
+  NIFTY.parquet
+  BANKNIFTY.parquet
+  FINNIFTY.parquet
+  ...
 
 The ``trade_date=`` directory prefix is the hive partition key DuckDB
 uses for partition pruning -- trade_date is auto-extracted from the
-path and does not need to be stored as a column.  The ``underlying``
+path and does not need to be stored as a column. The ``underlying``
 column is stored inside each file so analytics queries can filter by
 both dimensions.
 
 Performance
 -----------
 At 75 snaps x ~500 strikes per underlying, a full daily file is
-~37 500 rows.  pyarrow write of that size is typically <50 ms --
+~37 500 rows. pyarrow write of that size is typically <50 ms --
 well within the 5-minute scheduler tick budget.
 
 Schema enforcement (W-1)
 ------------------------
-PARQUET_SCHEMA declares explicit dtypes for all 28 analytics columns.
+PARQUET_SCHEMA declares explicit dtypes for all analytics columns.
 Passing it to pa.Table.from_pandas() prevents pandas dtype inference
 from producing int32/float32 columns on snaps where certain rows are
 absent (e.g. no futures rows -> Greeks inferred as int64 instead of
@@ -55,7 +55,7 @@ Column notes
 - option_type: nullable=True because FUT rows have no option_type (NULL).
   Previously nullable=False caused ArrowInvalid crash on every futures write.
 - bid_qty / ask_qty: mapped from BQ total_buy_qty / total_sell_qty.
-  Cumulative day buy/sell flow totals.  Required by coc.py get_atm_obi(),
+  Cumulative day buy/sell flow totals. Required by coc.py get_atm_obi(),
   get_futures_obi() and pcr.py _smoothed_obi().
 - bid1_qty / bid1_price: live L1 best-bid from depth_bid1_qty/price.
   Instantaneous order book state. NULL when order book side is empty.
@@ -64,6 +64,9 @@ Column notes
 - open: intrabar open price. NULL when absent in older BQ backfill data.
 - vex / cex: Vanna Exposure and Charm Exposure, computed by processor.py.
   Required by vex_cex.py analytics.
+- avg_volume_20d: pre-computed 20-day rolling avg volume from BQ pipeline.
+  nullable=True: absent in older backfill data that predates the BQ column.
+  Required by screener.py momentum factor (volume / avg_volume_20d).
 - s_score: REMOVED. Computed live by screener.py -- must never be stored
   in Parquet (per-snap value would be stale immediately after write).
 - rho: NOT ADDED. Not provided by Upstox API / BQ feed.
@@ -73,6 +76,11 @@ P2-14: FileLock timeout
 The advisory lock timeout is read from settings.WRITER_LOCK_TIMEOUT_SECONDS
 (default 30 s, same as the previous hardcoded value) so it can be tuned
 per deployment in .env without a code change.
+
+MIGRATION NOTE
+--------------
+Removing or renaming a column here is a breaking schema change.
+Update REQUIRED_COLUMNS in duckdb_gateway.py to match any additions.
 """
 from __future__ import annotations
 
@@ -86,23 +94,23 @@ from loguru import logger
 
 from optdash.config import settings
 
-PROCESSED_SUBDIR   = "processed"
-_PARTITION_PREFIX  = "trade_date="
+PROCESSED_SUBDIR  = "processed"
+_PARTITION_PREFIX = "trade_date="
 
 # Canonical Parquet schema for all processed files.
 # Enforced at write time so dtype drift between daily files never produces
 # silent NULL columns when DuckDB reads them via union_by_name=true.
 #
 # Rules:
-#   - nullable=False: column must be present in every row (write fails loudly
-#     on missing data so upstream BQ feed gaps are caught at ingest time).
-#   - nullable=True:  column may be NULL (Greeks absent for spot/futures rows;
-#     dte absent for non-expiring instruments; option_type NULL for FUT rows).
-#   - All price/Greek columns are float64 -- prevents int32/float32 drift from
-#     pandas inference that breaks DuckDB predicate pushdown min/max stats.
-#
-# MIGRATION NOTE: removing or renaming a column here is a breaking schema
-# change. Update REQUIRED_COLUMNS in duckdb_gateway.py to match any additions.
+#   nullable=False — column must be present in every row; write fails loudly
+#                    on missing data so upstream BQ feed gaps are caught at
+#                    ingest time.
+#   nullable=True  — column may be NULL (Greeks absent for spot/futures rows;
+#                    dte absent for non-expiring instruments; option_type NULL
+#                    for FUT rows).
+#   All price/Greek columns are float64 — prevents int32/float32 drift from
+#   pandas inference that breaks DuckDB predicate pushdown min/max stats.
+
 PARQUET_SCHEMA = pa.schema([
     pa.field("snap_time",       pa.string(),  nullable=False),
     pa.field("underlying",      pa.string(),  nullable=False),
@@ -126,48 +134,48 @@ PARQUET_SCHEMA = pa.schema([
     # 5-level bid depth — L1 = best bid, L5 = deepest.
     # qty/orders: int64 (lot counts); price: float64.
     # NULL when fewer than N levels exist (illiquid / far-OTM strikes).
-    pa.field("bid1_qty",        pa.int64(),   nullable=True),
-    pa.field("bid1_price",      pa.float64(), nullable=True),
-    pa.field("bid1_orders",     pa.int64(),   nullable=True),
-    pa.field("bid2_qty",        pa.int64(),   nullable=True),
-    pa.field("bid2_price",      pa.float64(), nullable=True),
-    pa.field("bid2_orders",     pa.int64(),   nullable=True),
-    pa.field("bid3_qty",        pa.int64(),   nullable=True),
-    pa.field("bid3_price",      pa.float64(), nullable=True),
-    pa.field("bid3_orders",     pa.int64(),   nullable=True),
-    pa.field("bid4_qty",        pa.int64(),   nullable=True),
-    pa.field("bid4_price",      pa.float64(), nullable=True),
-    pa.field("bid4_orders",     pa.int64(),   nullable=True),
-    pa.field("bid5_qty",        pa.int64(),   nullable=True),
-    pa.field("bid5_price",      pa.float64(), nullable=True),
-    pa.field("bid5_orders",     pa.int64(),   nullable=True),
+    pa.field("bid1_qty",    pa.int64(),   nullable=True),
+    pa.field("bid1_price",  pa.float64(), nullable=True),
+    pa.field("bid1_orders", pa.int64(),   nullable=True),
+    pa.field("bid2_qty",    pa.int64(),   nullable=True),
+    pa.field("bid2_price",  pa.float64(), nullable=True),
+    pa.field("bid2_orders", pa.int64(),   nullable=True),
+    pa.field("bid3_qty",    pa.int64(),   nullable=True),
+    pa.field("bid3_price",  pa.float64(), nullable=True),
+    pa.field("bid3_orders", pa.int64(),   nullable=True),
+    pa.field("bid4_qty",    pa.int64(),   nullable=True),
+    pa.field("bid4_price",  pa.float64(), nullable=True),
+    pa.field("bid4_orders", pa.int64(),   nullable=True),
+    pa.field("bid5_qty",    pa.int64(),   nullable=True),
+    pa.field("bid5_price",  pa.float64(), nullable=True),
+    pa.field("bid5_orders", pa.int64(),   nullable=True),
     # 5-level ask depth — L1 = best ask, L5 = deepest.
-    pa.field("ask1_qty",        pa.int64(),   nullable=True),
-    pa.field("ask1_price",      pa.float64(), nullable=True),
-    pa.field("ask1_orders",     pa.int64(),   nullable=True),
-    pa.field("ask2_qty",        pa.int64(),   nullable=True),
-    pa.field("ask2_price",      pa.float64(), nullable=True),
-    pa.field("ask2_orders",     pa.int64(),   nullable=True),
-    pa.field("ask3_qty",        pa.int64(),   nullable=True),
-    pa.field("ask3_price",      pa.float64(), nullable=True),
-    pa.field("ask3_orders",     pa.int64(),   nullable=True),
-    pa.field("ask4_qty",        pa.int64(),   nullable=True),
-    pa.field("ask4_price",      pa.float64(), nullable=True),
-    pa.field("ask4_orders",     pa.int64(),   nullable=True),
-    pa.field("ask5_qty",        pa.int64(),   nullable=True),
-    pa.field("ask5_price",      pa.float64(), nullable=True),
-    pa.field("ask5_orders",     pa.int64(),   nullable=True),
-    pa.field("gex",             pa.float64(), nullable=True),
-    pa.field("vex",             pa.float64(), nullable=True),   # Vanna Exposure
-    pa.field("cex",             pa.float64(), nullable=True),   # Charm Exposure
-    pa.field("expiry_tier",     pa.string(),  nullable=True),
-    pa.field("dte",             pa.int32(),   nullable=True),
-    # Fix O-1: avg_volume_20d pre-computed by BQ pipeline (rolling 20-day avg
-    # volume per strike).  Required by screener.py momentum factor.
+    pa.field("ask1_qty",    pa.int64(),   nullable=True),
+    pa.field("ask1_price",  pa.float64(), nullable=True),
+    pa.field("ask1_orders", pa.int64(),   nullable=True),
+    pa.field("ask2_qty",    pa.int64(),   nullable=True),
+    pa.field("ask2_price",  pa.float64(), nullable=True),
+    pa.field("ask2_orders", pa.int64(),   nullable=True),
+    pa.field("ask3_qty",    pa.int64(),   nullable=True),
+    pa.field("ask3_price",  pa.float64(), nullable=True),
+    pa.field("ask3_orders", pa.int64(),   nullable=True),
+    pa.field("ask4_qty",    pa.int64(),   nullable=True),
+    pa.field("ask4_price",  pa.float64(), nullable=True),
+    pa.field("ask4_orders", pa.int64(),   nullable=True),
+    pa.field("ask5_qty",    pa.int64(),   nullable=True),
+    pa.field("ask5_price",  pa.float64(), nullable=True),
+    pa.field("ask5_orders", pa.int64(),   nullable=True),
+    pa.field("gex",          pa.float64(), nullable=True),
+    pa.field("vex",          pa.float64(), nullable=True),  # Vanna Exposure
+    pa.field("cex",          pa.float64(), nullable=True),  # Charm Exposure
+    pa.field("expiry_tier",  pa.string(),  nullable=True),
+    pa.field("dte",          pa.int32(),   nullable=True),
+    # avg_volume_20d: pre-computed 20-day rolling avg volume per strike from BQ.
     # nullable=True: absent in older backfill data that predates the BQ column.
-    pa.field("avg_volume_20d",  pa.float64(), nullable=True),
-    # REMOVED: s_score  -- computed live by screener.py, never stored in Parquet
-    # REMOVED: rho      -- not available from Upstox API / BQ feed
+    # Required by screener.py momentum factor: volume / avg_volume_20d.
+    pa.field("avg_volume_20d", pa.float64(), nullable=True),
+    # REMOVED: s_score    — computed live by screener.py, never stored in Parquet
+    # REMOVED: rho        — not available from Upstox API / BQ feed
 ])
 
 
@@ -191,10 +199,10 @@ def write_snap(
 
     Parameters
     ----------
-    data_root:  root data directory (settings.DATA_ROOT)
-    trade_date: ISO date string, e.g. '2026-03-06'
-    underlying: instrument name, e.g. 'NIFTY'
-    snap_df:    DataFrame for this snap -- must include a 'snap_time' column
+    data_root  : root data directory (settings.DATA_ROOT)
+    trade_date : ISO date string, e.g. '2026-03-06'
+    underlying : instrument name, e.g. 'NIFTY'
+    snap_df    : DataFrame for this snap -- must include a 'snap_time' column
     """
     if snap_df.empty:
         return
@@ -204,7 +212,7 @@ def write_snap(
 
     # Advisory lock: serialises concurrent read-merge-write on the same file.
     # P2-14: timeout read from settings so it can be tuned per deployment
-    # without a code change.  Default 30 s preserves the previous behaviour.
+    # without a code change. Default 30 s preserves the previous behaviour.
     # Raise on timeout rather than stacking up writers behind the lock.
     lock_path = path.with_suffix(".lock")
     with FileLock(str(lock_path), timeout=settings.WRITER_LOCK_TIMEOUT_SECONDS):
@@ -239,10 +247,11 @@ def _write_snap_locked(
         )
 
         # Fix W-1: enforce PARQUET_SCHEMA so every daily file has identical
-        # dtypes. safe=False raises ArrowInvalid immediately on cast failure
-        # rather than silently coercing bad values to NULL (safe=True default).
-        # This surfaces upstream BQ feed dtype changes at write time, not at
-        # query time when analytics return silent NULLs for gate/GEX columns.
+        # dtypes. safe=False allows lossless numeric casts (e.g. pandas Int64
+        # nullable integer → pyarrow int64) while raising ArrowInvalid on
+        # genuine type mismatches (e.g. string in a float64 column). This
+        # surfaces upstream BQ feed dtype changes at write time rather than
+        # silently producing NULL columns in DuckDB analytics queries.
         try:
             table = pa.Table.from_pandas(
                 merged,
@@ -266,7 +275,7 @@ def _write_snap_locked(
             compression="snappy",
             write_statistics=True,   # enables min/max pushdown in DuckDB
         )
-        tmp_path.replace(path)   # atomic on POSIX (same filesystem)
+        tmp_path.replace(path)  # atomic on POSIX (same filesystem)
 
         logger.debug(
             "[Writer] {}/{} -- {} rows -> {}",
